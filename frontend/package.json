@@ -1,0 +1,13 @@
+{
+  "name": "k8s-demo-frontend",
+  "version": "1.0.0",
+  "description": "Demo frontend for Kubernetes deployment",
+  "scripts": {
+    "start": "npx serve -s . -l 3000",
+    "dev": "npx serve -s . -l 3000"
+  },
+  "devDependencies": {
+    "serve": "^14.2.1"
+  }
+}
+
