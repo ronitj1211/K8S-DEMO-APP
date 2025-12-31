@@ -19,5 +19,5 @@ spec:
     spec:
       containers:
         - name: backend
-          image: k8s-demo-backend:v2
+          image: k8s-demo-backend:v1
           imagePullPolicy: Never

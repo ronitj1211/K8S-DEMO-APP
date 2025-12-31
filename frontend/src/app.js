@@ -1,10 +1,10 @@
 // API base URL - dynamically determines backend URL based on environment
-// In Kubernetes: uses same host as frontend but on backend's NodePort (30080)
-// In local dev: falls back to localhost:3001
+// In Kubernetes (NodePort): frontend on :30000, backend on :30080
+// In local dev: frontend on :3000, backend on :3001
 const API_URL = window.API_URL || (
-  window.location.hostname === 'localhost' 
-    ? 'http://localhost:3001' 
-    : `http://${window.location.hostname}:30080`
+  window.location.port === '30000'
+    ? `http://${window.location.hostname}:30080`  // Kubernetes NodePort
+    : 'http://localhost:3001'                      // Local development
 );
 
 // DOM Elements
