@@ -1,5 +1,11 @@
-// API base URL - uses environment variable or defaults to localhost for development
-const API_URL = window.API_URL || 'http://localhost:3001';
+// API base URL - dynamically determines backend URL based on environment
+// In Kubernetes: uses same host as frontend but on backend's NodePort (30080)
+// In local dev: falls back to localhost:3001
+const API_URL = window.API_URL || (
+  window.location.hostname === 'localhost' 
+    ? 'http://localhost:3001' 
+    : `http://${window.location.hostname}:30080`
+);
 
 // DOM Elements
 const statusBadge = document.getElementById('status');
