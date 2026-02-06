@@ -1,20 +1,55 @@
+# ============================================
+# DEPLOYMENT MANIFEST
+# A Deployment manages a set of identical Pods
+# ============================================
+
 apiVersion: apps/v1
 kind: Deployment
+
+# --------------------------------------------
+# DEPLOYMENT METADATA
+# This is information about the Deployment itself
+# --------------------------------------------
 metadata:
-  name: frontend-deployment
+  name: frontend-deployment       # Name of this Deployment
+
+# --------------------------------------------
+# DEPLOYMENT SPECIFICATION
+# Defines how the Deployment should behave
+# --------------------------------------------
 spec:
-  replicas: 2
+  replicas: 2                     # Create and maintain 2 identical Pods
+
+  # ==========================================
+  # SELECTOR - How Deployment finds its Pods
+  # ==========================================
+  # This tells the Deployment: "Manage all Pods that have the label app=frontend"
+  # The Deployment uses this to know which Pods belong to it
   selector:
     matchLabels:
-      app: frontend
+      app: frontend               # Must match Pod's label below!
+
+  # ==========================================
+  # POD TEMPLATE - Blueprint for creating Pods
+  # ==========================================
+  # Everything below defines what each Pod looks like
   template:
+    # ----------------------------------------
+    # POD METADATA - Labels for the Pod
+    # ----------------------------------------
     metadata:
       labels:
-        app: frontend
+        app: frontend             # This label is attached to each Pod
+                                  # Must match selector above!
+                                  # Service also uses this to find Pods
+
+    # ----------------------------------------
+    # POD SPECIFICATION - What runs in the Pod
+    # ----------------------------------------
     spec:
       containers:
-        - name: frontend
-          image: k8s-demo-frontend:v1
-          imagePullPolicy: Never
+        - name: frontend                  # Container name
+          image: k8s-demo-frontend:v1     # Docker image to use
+          imagePullPolicy: Never          # Use local image, don't pull from registry
           ports:
-            - containerPort: 3000
+            - containerPort: 3000         # Port the container exposes

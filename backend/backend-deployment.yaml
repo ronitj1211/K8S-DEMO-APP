@@ -1,23 +1,61 @@
+# ============================================
+# DEPLOYMENT MANIFEST
+# A Deployment manages a set of identical Pods
+# ============================================
+
 apiVersion: apps/v1
 kind: Deployment
+
+# --------------------------------------------
+# DEPLOYMENT METADATA
+# This is information about the Deployment itself
+# --------------------------------------------
 metadata:
-  name: backend-deployment
+  name: backend-deployment        # Name of this Deployment
+
+# --------------------------------------------
+# DEPLOYMENT SPECIFICATION
+# Defines how the Deployment should behave
+# --------------------------------------------
 spec:
-  replicas: 2
+  replicas: 2                     # Create and maintain 2 identical Pods
+
+  # ROLLING UPDATE STRATEGY
+  # How to update Pods when changes are made
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 1
+      maxSurge: 1                 # Max 1 extra Pod during update
+      maxUnavailable: 1           # Max 1 Pod can be unavailable during update
+
+  # ==========================================
+  # SELECTOR - How Deployment finds its Pods
+  # ==========================================
+  # This tells the Deployment: "Manage all Pods that have the label app=backend"
+  # The Deployment uses this to know which Pods belong to it
   selector:
     matchLabels:
-      app: backend
+      app: backend                # Must match Pod's label below!
+
+  # ==========================================
+  # POD TEMPLATE - Blueprint for creating Pods
+  # ==========================================
+  # Everything below defines what each Pod looks like
   template:
+    # ----------------------------------------
+    # POD METADATA - Labels for the Pod
+    # ----------------------------------------
     metadata:
       labels:
-        app: backend
+        app: backend              # This label is attached to each Pod
+                                  # Must match selector above!
+                                  # Service also uses this to find Pods
+
+    # ----------------------------------------
+    # POD SPECIFICATION - What runs in the Pod
+    # ----------------------------------------
     spec:
       containers:
-        - name: backend
-          image: k8s-demo-backend:v1
-          imagePullPolicy: Never
+        - name: backend                   # Container name
+          image: k8s-demo-backend:v1      # Docker image to use
+          imagePullPolicy: Never          # Use local image, don't pull from registry

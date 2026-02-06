@@ -1,12 +1,59 @@
+# ============================================
+# SERVICE MANIFEST
+# A Service provides network access to Pods
+# ============================================
+
 apiVersion: v1
 kind: Service
+
+# --------------------------------------------
+# SERVICE METADATA
+# Information about the Service itself
+# --------------------------------------------
 metadata:
-  name: backend-service
+  name: backend-service           # Name of this Service
+
+# --------------------------------------------
+# SERVICE SPECIFICATION
+# Defines how the Service routes traffic
+# --------------------------------------------
 spec:
-  type: NodePort
+  type: NodePort                  # Expose on each Node's IP at a static port
+                                  # Other types: ClusterIP, LoadBalancer
+
+  # ==========================================
+  # SELECTOR - How Service finds Pods
+  # ==========================================
+  # This tells the Service: "Route traffic to all Pods with label app=backend"
+  # Must match the label defined in Deployment's Pod template!
   selector:
-    app: backend
+    app: backend                  # Find Pods with this label
+
+  # ==========================================
+  # PORTS - Network port mapping
+  # ==========================================
   ports:
-    - port: 3001
-      targetPort: 3001
-      nodePort: 30080
+    - port: 3001                  # Service port (used inside cluster)
+      targetPort: 3001            # Container port (where app listens)
+      nodePort: 30080             # External port (access from outside: localhost:30080)
+
+# ============================================
+# HOW IT WORKS:
+# 
+# External Request (localhost:30080)
+#         |
+#         v
+#    [NodePort: 30080]
+#         |
+#         v
+#    [Service Port: 3001]
+#         |
+#         v
+#    [selector: app=backend] --> Finds all Pods with label "app: backend"
+#         |
+#    +---------+---------+
+#    |                   |
+#    v                   v
+#  Pod 1               Pod 2
+#  (targetPort:3001)   (targetPort:3001)
+# ============================================
