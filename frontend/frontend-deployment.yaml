@@ -51,5 +51,39 @@ spec:
         - name: frontend                  # Container name
           image: k8s-demo-frontend:v1     # Docker image to use
           imagePullPolicy: Never          # Use local image, don't pull from registry
+          
           ports:
             - containerPort: 3000         # Port the container exposes
+
+          # ======================================
+          # ENVIRONMENT FROM CONFIGMAP
+          # ======================================
+          # Load ALL keys from ConfigMap as env vars
+          envFrom:
+            - configMapRef:
+                name: frontend-config     # Reference to ConfigMap
+
+          # ======================================
+          # ENVIRONMENT FROM SECRET
+          # ======================================
+          env:
+            - name: ANALYTICS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: frontend-secret
+                  key: ANALYTICS_API_KEY
+
+# ============================================
+# HOW CONFIGMAP/SECRET INJECTION WORKS:
+#
+# 1. ConfigMap (frontend-config) contains:
+#    - NODE_ENV: "production"
+#    - BACKEND_URL: "http://backend-service:3001"
+#
+# 2. Using envFrom, ALL these become env vars:
+#    process.env.NODE_ENV = "production"
+#    process.env.BACKEND_URL = "http://backend-service:3001"
+#
+# 3. Secret values are injected individually:
+#    process.env.ANALYTICS_API_KEY = "analytics-key-abc123"
+# ============================================

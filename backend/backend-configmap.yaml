@@ -1,0 +1,60 @@
+# ============================================
+# CONFIGMAP MANIFEST
+# ConfigMaps store non-sensitive configuration
+# data as key-value pairs
+# ============================================
+
+apiVersion: v1
+kind: ConfigMap
+
+# --------------------------------------------
+# CONFIGMAP METADATA
+# --------------------------------------------
+metadata:
+  name: backend-config            # Name to reference this ConfigMap
+
+# --------------------------------------------
+# DATA - Key-Value Configuration
+# --------------------------------------------
+# These values can be injected into Pods as:
+# 1. Environment variables
+# 2. Files mounted in a volume
+data:
+  # Application settings
+  NODE_ENV: "production"
+  PORT: "3001"
+  LOG_LEVEL: "info"
+  
+  # API settings
+  API_VERSION: "v1"
+  CORS_ORIGIN: "http://localhost:30000"
+  
+  # You can also store entire config files
+  app.properties: |
+    app.name=k8s-demo-backend
+    app.version=1.0.0
+    feature.flag.newUI=true
+
+# ============================================
+# HOW TO USE IN A POD:
+#
+# Option 1: Single environment variable
+# env:
+#   - name: MY_NODE_ENV
+#     valueFrom:
+#       configMapKeyRef:
+#         name: backend-config
+#         key: NODE_ENV
+#
+# Option 2: All keys as environment variables
+# envFrom:
+#   - configMapRef:
+#       name: backend-config
+#
+# Option 3: Mount as file
+# volumes:
+#   - name: config-volume
+#     configMap:
+#       name: backend-config
+# ============================================
+

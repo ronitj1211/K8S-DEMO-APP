@@ -59,3 +59,47 @@ spec:
         - name: backend                   # Container name
           image: k8s-demo-backend:v1      # Docker image to use
           imagePullPolicy: Never          # Use local image, don't pull from registry
+          
+          ports:
+            - containerPort: 3001         # Port the container exposes
+
+          # ======================================
+          # ENVIRONMENT FROM CONFIGMAP
+          # ======================================
+          # Load ALL keys from ConfigMap as env vars
+          envFrom:
+            - configMapRef:
+                name: backend-config      # Reference to ConfigMap
+
+          # ======================================
+          # ENVIRONMENT FROM SECRET
+          # ======================================
+          # Load specific secret values
+          env:
+            - name: DB_PASSWORD           # Env var name in container
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret    # Reference to Secret
+                  key: DB_PASSWORD        # Key in the Secret
+            
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: API_KEY
+            
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: JWT_SECRET
+
+# ============================================
+# DEPLOYMENT ORDER:
+# 1. First apply ConfigMap:  kubectl apply -f backend-configmap.yaml
+# 2. Then apply Secret:      kubectl apply -f backend-secret.yaml
+# 3. Finally Deployment:     kubectl apply -f backend-deployment.yaml
+#
+# Or all at once:
+# kubectl apply -f backend-configmap.yaml -f backend-secret.yaml -f backend-deployment.yaml
+# ============================================

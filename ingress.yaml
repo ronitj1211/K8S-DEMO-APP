@@ -1,0 +1,116 @@
+# ============================================
+# INGRESS MANIFEST
+# Ingress manages external HTTP/HTTPS access
+# to services in the cluster
+# ============================================
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+
+# --------------------------------------------
+# INGRESS METADATA
+# --------------------------------------------
+metadata:
+  name: app-ingress
+  annotations:
+    # Nginx Ingress Controller annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    # Enable CORS if needed
+    # nginx.ingress.kubernetes.io/enable-cors: "true"
+
+# --------------------------------------------
+# INGRESS SPECIFICATION
+# --------------------------------------------
+spec:
+  # ==========================================
+  # INGRESS CLASS
+  # ==========================================
+  # Specifies which Ingress Controller handles this
+  ingressClassName: nginx
+
+  # ==========================================
+  # ROUTING RULES
+  # ==========================================
+  rules:
+    # Rule for localhost (or your domain)
+    - host: localhost             # Change to your domain in production
+      http:
+        paths:
+          # --------------------------------
+          # BACKEND API ROUTE
+          # --------------------------------
+          # All requests to /api/* go to backend
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service     # Route to backend service
+                port:
+                  number: 3001
+          
+          # --------------------------------
+          # FRONTEND ROUTE
+          # --------------------------------
+          # All other requests go to frontend
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service    # Route to frontend service
+                port:
+                  number: 3000
+
+# ============================================
+# HOW INGRESS ROUTING WORKS:
+#
+#                    INTERNET
+#                        │
+#                        ▼
+#              ┌─────────────────┐
+#              │ Ingress (Port 80)│
+#              │   localhost      │
+#              └────────┬────────┘
+#                       │
+#         ┌─────────────┴─────────────┐
+#         │                           │
+#    path: /api/*              path: /*
+#         │                           │
+#         ▼                           ▼
+# ┌───────────────┐         ┌───────────────┐
+# │backend-service│         │frontend-service│
+# │   port: 3001  │         │   port: 3000   │
+# └───────────────┘         └───────────────┘
+#         │                           │
+#    ┌────┴────┐                ┌────┴────┐
+#    ▼         ▼                ▼         ▼
+#  Pod 1    Pod 2            Pod 1     Pod 2
+#
+# ============================================
+# 
+# BENEFITS OF INGRESS vs NodePort:
+#
+# NodePort:
+#   - frontend: localhost:30000
+#   - backend:  localhost:30080
+#   - Each service needs its own port
+#
+# Ingress:
+#   - frontend: localhost/
+#   - backend:  localhost/api
+#   - Single entry point (port 80)
+#   - Path-based routing
+#   - SSL/TLS termination
+#   - Load balancing
+#
+# ============================================
+#
+# SETUP INGRESS CONTROLLER:
+#
+# For Colima/k3s:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+#
+# For Minikube:
+#   minikube addons enable ingress
+#
+# ============================================
+
