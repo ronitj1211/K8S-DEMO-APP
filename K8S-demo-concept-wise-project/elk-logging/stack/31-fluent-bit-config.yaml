@@ -21,7 +21,9 @@ data:
         Name              tail
         Tag               kube.*
         Path              /var/log/containers/*.log
-        Parser            cri
+        # multiline.parser handles BOTH containerd/CRI AND Docker log formats:
+        # whichever the node uses, the outer wrapper is stripped automatically.
+        multiline.parser  docker, cri
         DB                /var/log/flb_kube.db
         Mem_Buf_Limit     5MB
         Skip_Long_Lines   On

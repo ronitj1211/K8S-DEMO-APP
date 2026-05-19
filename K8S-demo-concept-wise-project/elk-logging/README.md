@@ -99,6 +99,10 @@ elk-logging/
 ├── frontend/                         # button UI that hits the backend
 │   ├── index.html, Dockerfile
 │   └── frontend.yaml
+├── orders-service/                   # SECOND demo app — different log shape (orderId, customerId, ...)
+│   ├── server.js                     # POST /orders, POST /payments/charge, GET /orders/:id
+│   ├── package.json, Dockerfile
+│   └── orders-service.yaml           # Deployment + NodePort, 2 replicas
 ├── stack/                            # the EFK stack itself, in namespace "logging"
 │   ├── 00-namespace.yaml             # "logging" + "demo" namespaces
 │   ├── 10-elasticsearch.yaml         # ES StatefulSet + Service (single node)
@@ -106,8 +110,17 @@ elk-logging/
 │   ├── 30-fluent-bit-rbac.yaml       # SA + ClusterRole + Binding (read pods/ns)
 │   ├── 31-fluent-bit-config.yaml     # ConfigMap with the Fluent Bit pipeline
 │   └── 32-fluent-bit-daemonset.yaml  # DaemonSet — one Pod per node
-└── README.md
+├── README.md
+├── KIBANA_GUIDE.md                   # step-by-step Kibana setup + per-service filtering
+└── HOW_IT_CONNECTS.md                # who talks to whom, what address, where in the YAML
 ```
+
+Two services emit logs:
+
+- **`sample-app`** — simple HTTP endpoints (`/`, `/warn`, `/error`).
+- **`orders-service`** — order/payment endpoints, logs with `orderId`, `customerId`, `action`, etc.
+
+The point of having two is to practice **distinguishing services in Kibana**. See [KIBANA_GUIDE.md](./KIBANA_GUIDE.md) for the full walkthrough.
 
 > ⚠️ This stack is sized for a **laptop / learning cluster**: single-node Elasticsearch, no security, no PVC, no replicas. For real workloads use the [ECK operator](https://www.elastic.co/guide/en/cloud-on-k8s/current/index.html) or [bitnami/elasticsearch](https://artifacthub.io/packages/helm/bitnami/elasticsearch) Helm chart.
 
@@ -133,8 +146,9 @@ elk-logging/
 ```bash
 eval $(minikube docker-env)   # minikube only
 
-cd backend  && docker build -t elk-demo-backend:1.0 .
-cd ../frontend && docker build -t elk-demo-frontend:1.0 .
+cd backend         && docker build -t elk-demo-backend:1.0 .
+cd ../frontend     && docker build -t elk-demo-frontend:1.0 .
+cd ../orders-service && docker build -t orders-service:1.0 .
 ```
 
 For kind:
@@ -142,6 +156,7 @@ For kind:
 ```bash
 kind load docker-image elk-demo-backend:1.0
 kind load docker-image elk-demo-frontend:1.0
+kind load docker-image orders-service:1.0
 ```
 
 ### 2. Apply the stack (in order)
@@ -169,10 +184,11 @@ kubectl get pods -n logging -w
 
 Wait until Elasticsearch and Kibana are `Running` and `1/1` ready. Elasticsearch takes ~30s, Kibana takes ~60s the first time.
 
-### 4. Deploy the sample app
+### 4. Deploy the sample apps
 
 ```bash
 kubectl apply -f backend/sample-app.yaml
+kubectl apply -f orders-service/orders-service.yaml
 kubectl apply -f frontend/frontend.yaml
 kubectl get pods -n demo
 ```
@@ -180,16 +196,21 @@ kubectl get pods -n demo
 ### 5. Generate some logs
 
 ```bash
-# CLI
+# CLI — sample-app
 NODE_IP=$(minikube ip)
 curl http://$NODE_IP:30090/
 curl http://$NODE_IP:30090/warn
 curl http://$NODE_IP:30090/error
+
+# CLI — orders-service
+curl -X POST http://$NODE_IP:30099/orders
+curl -X POST http://$NODE_IP:30099/payments/charge
+curl      http://$NODE_IP:30099/orders/ord_1003
 ```
 
 Or open the UI: `http://<node-ip>:30091` and click the buttons.
 
-The heartbeat in `server.js` also writes an info log every 10 seconds — so even idle Pods produce data.
+Each service also emits a periodic background log (heartbeat / pending-orders scan), so idle pods still produce data.
 
 ### 6. Open Kibana
 
@@ -197,7 +218,7 @@ The heartbeat in `server.js` also writes an info log every 10 seconds — so eve
 http://<node-ip>:30092
 ```
 
-It takes a minute on the first open. Then:
+It takes a minute on the first open. **First-time-in-Kibana setup is its own walkthrough — see [KIBANA_GUIDE.md](./KIBANA_GUIDE.md).** Short version:
 
 1. Click **Discover** in the left menu (or **Stack Management → Data Views**).
 2. Create a **Data View** with index pattern `k8s-logs-*` and time field `@timestamp`.

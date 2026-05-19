@@ -29,7 +29,7 @@ spec:
           volumeMounts:
             - name: varlog
               mountPath: /var/log
-              readOnly: true
+              # writable: Fluent Bit stores its position DB here
             - name: varlibdockercontainers
               mountPath: /var/lib/docker/containers
               readOnly: true
