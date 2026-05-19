@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>K8s Pods Demo - Frontend</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    button { padding: 8px 16px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Kubernetes Pods Demo</h1>
+  <p>This frontend Pod calls the backend Pod.</p>
+  <button onclick="callBackend()">Call backend</button>
+  <pre id="out">Click the button to call backend.</pre>
+
+  <script>
+    // BACKEND_URL is injected at container start by entrypoint (or use localhost while developing).
+    const BACKEND_URL = window.BACKEND_URL || 'http://localhost:3000';
+    async function callBackend() {
+      const out = document.getElementById('out');
+      try {
+        const r = await fetch(BACKEND_URL);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+  </script>
+</body>
+</html>

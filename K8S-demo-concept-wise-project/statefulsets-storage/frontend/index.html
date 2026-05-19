@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>StatefulSet + PVC Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    input { padding: 6px; width: 100%; }
+    button { padding: 8px 16px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>StatefulSet + PVC Demo</h1>
+  <p>
+    Each Pod (counter-0, counter-1, counter-2) has its OWN PVC. The counter
+    survives Pod deletion. Hit "Increment 10x" and watch the counters
+    diverge by Pod.
+  </p>
+  <label>Backend URL (LB Service):</label>
+  <input id="url" value="http://localhost:30093" />
+  <br /><br />
+  <button onclick="read()">GET /</button>
+  <button onclick="inc(1)">Increment 1</button>
+  <button onclick="inc(10)">Increment 10x</button>
+  <pre id="out">Click a button.</pre>
+
+  <script>
+    async function read() {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      out.textContent = JSON.stringify(await (await fetch(url)).json(), null, 2);
+    }
+    async function inc(n) {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      const results = [];
+      for (let i = 0; i < n; i++) {
+        const r = await fetch(url + '/inc', { method: 'POST' });
+        results.push(await r.json());
+      }
+      out.textContent = results.map(r => `${r.podHostname}: counter=${r.counter}`).join('\n');
+    }
+  </script>
+</body>
+</html>

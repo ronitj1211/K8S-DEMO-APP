@@ -1,0 +1,16 @@
+# StorageClass: describes "what kind of storage" — provisioner, parameters,
+# reclaim behavior. On minikube the default StorageClass `standard` is fine;
+# this file shows what one looks like.
+#
+# Most clusters already have a default StorageClass. Inspect with:
+#   kubectl get storageclass
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: demo-standard
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: k8s.io/minikube-hostpath        # minikube provisioner; cloud uses ebs.csi.aws.com, pd.csi.storage.gke.io, etc.
+reclaimPolicy: Delete                        # Delete (default) or Retain
+volumeBindingMode: WaitForFirstConsumer      # bind only when a Pod actually needs it
+allowVolumeExpansion: true                   # later you can grow the PVC

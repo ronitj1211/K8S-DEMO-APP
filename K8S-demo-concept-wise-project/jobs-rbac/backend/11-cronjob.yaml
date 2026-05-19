@@ -1,0 +1,22 @@
+# CronJob: creates a Job on a cron schedule.
+# Use for: nightly reports, periodic cleanup, scheduled syncs.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: heartbeat
+  namespace: team-alpha
+spec:
+  schedule: "*/1 * * * *"      # every minute (for demo); typically "0 2 * * *" for 2am daily
+  concurrencyPolicy: Forbid    # don't start a new run if the previous one is still going
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: heartbeat
+              image: busybox:1.36
+              command: ["sh", "-c", "echo heartbeat at $(date)"]

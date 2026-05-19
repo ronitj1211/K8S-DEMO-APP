@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>K8s Ingress Demo - Frontend</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    button { padding: 8px 16px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Kubernetes Ingress Demo</h1>
+  <p>
+    The Ingress routes <code>/</code> to the frontend and <code>/api</code> to the backend
+    — both served from the same hostname.
+  </p>
+  <button onclick="callBackend()">GET /api/hello</button>
+  <pre id="out">Click the button to call /api/hello (proxied to the backend by the Ingress).</pre>
+
+  <script>
+    async function callBackend() {
+      const out = document.getElementById('out');
+      try {
+        // Note: same origin — no CORS, no port. Ingress handles routing.
+        const r = await fetch('/api/hello');
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+  </script>
+</body>
+</html>

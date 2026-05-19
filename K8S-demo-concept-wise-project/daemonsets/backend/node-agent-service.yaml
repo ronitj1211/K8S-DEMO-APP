@@ -1,0 +1,14 @@
+# A headless / regular Service in front of the DaemonSet, so the frontend
+# can hit "any node's agent" without knowing node IPs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-agent
+spec:
+  type: NodePort
+  selector:
+    app: node-agent
+  ports:
+    - port: 80
+      targetPort: 3000
+      nodePort: 30084

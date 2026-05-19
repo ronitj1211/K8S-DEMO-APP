@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>HPA Load Driver</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; max-height: 300px; overflow:auto; }
+    input { padding: 6px; width: 100%; }
+    button { padding: 8px 16px; cursor: pointer; }
+    .row { margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>HPA Load Driver</h1>
+  <p>Hold down "Drive load" — each request burns CPU on a Pod for 500ms. Watch the HPA scale up.</p>
+  <label>Backend URL:</label>
+  <input id="url" value="http://localhost:30097" />
+  <div class="row">
+    <button id="go" onclick="toggle()">Drive load (start)</button>
+    <button onclick="oneShot()">Single burst</button>
+  </div>
+  <pre id="out">Idle.</pre>
+
+  <script>
+    let running = false;
+    async function oneShot() {
+      const url = document.getElementById('url').value + '/burn?ms=500';
+      const j = await (await fetch(url)).json();
+      document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+    }
+    async function toggle() {
+      running = !running;
+      document.getElementById('go').textContent = running ? 'Stop' : 'Drive load (start)';
+      const out = document.getElementById('out');
+      const seen = {};
+      while (running) {
+        const url = document.getElementById('url').value + '/burn?ms=500';
+        // 10 parallel hits — keeps the cluster busy
+        await Promise.all(Array.from({length: 10}, () =>
+          fetch(url).then(r => r.json()).then(j => seen[j.hostname] = (seen[j.hostname]||0)+1).catch(()=>{})
+        ));
+        out.textContent = 'Hits per Pod:\n' + Object.entries(seen).map(([k,v]) => `${k}: ${v}`).join('\n');
+      }
+    }
+  </script>
+</body>
+</html>

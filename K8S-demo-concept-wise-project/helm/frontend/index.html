@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Helm Demo - Frontend</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    input { padding: 6px; width: 100%; }
+    button { padding: 8px 16px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Helm Demo</h1>
+  <p>The same chart deploys this app to dev or prod — only the values file differs.</p>
+  <label>Backend URL:</label>
+  <input id="url" value="http://localhost:30086" />
+  <br /><br />
+  <button onclick="callBackend()">Call backend</button>
+  <pre id="out">Click the button.</pre>
+
+  <script>
+    async function callBackend() {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      try {
+        const r = await fetch(url);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+  </script>
+</body>
+</html>

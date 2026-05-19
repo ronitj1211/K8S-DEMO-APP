@@ -1,0 +1,24 @@
+# Job: runs a Pod (or several) to completion, then stops.
+# Use for: migrations, one-off imports, batch processing.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hello-job
+  namespace: team-alpha
+spec:
+  completions: 3        # total successful Pods needed
+  parallelism: 2        # up to 2 running at the same time
+  backoffLimit: 4       # retries before the Job is marked failed
+  ttlSecondsAfterFinished: 600   # auto-cleanup 10 min after success
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "[$(date)] hello from job pod $HOSTNAME"
+              sleep 5
+              echo "[$(date)] done"

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Monitoring + NetworkPolicy Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; max-height: 300px; overflow:auto; }
+    button { padding: 8px 16px; cursor: pointer; }
+    input { padding: 6px; width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>Monitoring + NetworkPolicy</h1>
+  <p>Generate some traffic, then look at Prometheus / Grafana for the resulting metrics.</p>
+  <label>Backend URL:</label>
+  <input id="url" value="http://localhost:30100" />
+  <br /><br />
+  <button onclick="hit('/')">200</button>
+  <button onclick="hit('/slow')">slow</button>
+  <button onclick="hit('/error')">500</button>
+  <button onclick="spam(50)">Spam 50 mixed</button>
+  <pre id="out">Click a button.</pre>
+
+  <script>
+    async function hit(path) {
+      const url = document.getElementById('url').value + path;
+      try {
+        const r = await fetch(url);
+        document.getElementById('out').textContent = `${r.status} ${url}`;
+      } catch (e) {
+        document.getElementById('out').textContent = 'Error: ' + e.message;
+      }
+    }
+    async function spam(n) {
+      const base = document.getElementById('url').value;
+      const paths = ['/', '/slow', '/error'];
+      let ok = 0;
+      for (let i = 0; i < n; i++) {
+        try { await fetch(base + paths[i % paths.length]); ok++; }
+        catch {}
+      }
+      document.getElementById('out').textContent = `Sent ${n} requests, ${ok} succeeded.`;
+    }
+  </script>
+</body>
+</html>

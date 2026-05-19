@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: k8s-demo-backend:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          # Pattern A: pull individual ConfigMap/Secret keys into env vars.
+          env:
+            - name: APP_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: APP_NAME
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: LOG_LEVEL
+            - name: GREETING
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: GREETING
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: API_KEY
+          # Pattern B: pull ALL keys from a ConfigMap/Secret as env vars.
+          # envFrom:
+          #   - configMapRef:
+          #       name: backend-config
+          #   - secretRef:
+          #       name: backend-secret
+
+          # Pattern C: mount as files. The ConfigMap's `app.conf` key becomes
+          # the file /etc/config/app.conf inside the container.
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: backend-config
+            items:
+              - key: app.conf
+                path: app.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  type: NodePort
+  selector:
+    app: backend
+  ports:
+    - port: 80
+      targetPort: 3000
+      nodePort: 30082

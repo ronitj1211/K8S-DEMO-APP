@@ -1,0 +1,14 @@
+# Production overrides. Apply on top of values.yaml with:
+#   helm upgrade --install demo ./chart -f chart/values-prod.yaml
+backend:
+  replicas: 4                 # more replicas in prod
+  env:
+    GREETING: "hello from PROD"
+    APP_ENV: "prod"
+  service:
+    nodePort: 30186           # different port so dev + prod can coexist
+
+frontend:
+  replicas: 2
+  service:
+    nodePort: 30187

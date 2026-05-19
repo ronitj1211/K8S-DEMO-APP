@@ -1,0 +1,57 @@
+# Fluent Bit pipeline:
+#   INPUT (tail container logs)  ->  FILTER (parse JSON + enrich with K8s metadata)
+#                                        ->  OUTPUT (ship to Elasticsearch)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Daemon        Off
+        Log_Level     info
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        Parser            cri
+        DB                /var/log/flb_kube.db
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+        Refresh_Interval  5
+
+    # Add Pod labels, namespace, name, container name to each record.
+    [FILTER]
+        Name              kubernetes
+        Match             kube.*
+        Kube_URL          https://kubernetes.default.svc:443
+        Merge_Log         On
+        Merge_Log_Key     log_processed
+        K8S-Logging.Parser   On
+        K8S-Logging.Exclude  Off
+
+    [OUTPUT]
+        Name              es
+        Match             *
+        Host              elasticsearch.logging.svc.cluster.local
+        Port              9200
+        Logstash_Format   On
+        Logstash_Prefix   k8s-logs
+        Suppress_Type_Name On
+        Retry_Limit       False
+
+  parsers.conf: |
+    # containerd / CRI-O log line format
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z

@@ -1,0 +1,13 @@
+# LoadBalancer: asks the cloud provider (AWS / GCP / Azure) to provision
+# an external load balancer. On minikube use `minikube tunnel` to simulate it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-lb
+spec:
+  type: LoadBalancer
+  selector:
+    app: backend
+  ports:
+    - port: 80
+      targetPort: 3000

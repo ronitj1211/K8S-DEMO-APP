@@ -1,0 +1,17 @@
+# Standalone PVC example (NOT used by the StatefulSet above — that one
+# generates its own PVCs from volumeClaimTemplates).
+#
+# Use a plain PVC like this when a single Deployment needs shared storage,
+# or for a one-off Pod that needs to write data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-data
+spec:
+  accessModes:
+    - ReadWriteOnce               # only one node can mount it RW (most cloud disks)
+    # - ReadWriteMany              # many nodes RW — needs NFS / EFS / etc.
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName: demo-standard

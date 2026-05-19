@@ -1,0 +1,46 @@
+# A DaemonSet runs ONE Pod per node. As nodes join or leave the cluster,
+# the DaemonSet adds or removes Pods automatically.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+  labels:
+    app: node-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-agent
+  # Optional: only run on nodes matching a label. Commented out — by default
+  # the DaemonSet runs on every schedulable node.
+  # template.spec.nodeSelector:
+  #   role: monitoring
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      # Tolerate the control-plane taint if you want this on master nodes too.
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     effect: NoSchedule
+      containers:
+        - name: agent
+          image: k8s-demo-node-agent:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              hostPort: 33000     # also expose on the node's port (DaemonSet pattern)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: host-logs
+              mountPath: /host-logs
+              readOnly: true
+      volumes:
+        - name: host-logs
+          hostPath:
+            path: /var/log        # read logs from the node itself
+            type: DirectoryOrCreate

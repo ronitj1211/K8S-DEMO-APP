@@ -1,0 +1,36 @@
+# HPA: scales the cpu-burner Deployment between 1 and 5 replicas, targeting
+# 50% of the CPU REQUEST per Pod.
+#
+# Math: each Pod requests 100m. Target = 50% of 100m = 50m used per Pod.
+# If average current usage across Pods is 250m, HPA wants ~ 250m / 50m = 5 Pods.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cpu-burner
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cpu-burner
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50      # 50% of requested CPU
+  behavior:                            # optional: tune how fast it reacts
+    scaleUp:
+      stabilizationWindowSeconds: 0    # add replicas immediately
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30            # at most +2 Pods every 30s
+    scaleDown:
+      stabilizationWindowSeconds: 300  # wait 5 min of low load before shrinking
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

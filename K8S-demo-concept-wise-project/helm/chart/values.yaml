@@ -1,0 +1,27 @@
+# Default values for the chart. Override on the command line with --set
+# or with an environment-specific values file (-f values-prod.yaml).
+
+backend:
+  image:
+    repository: k8s-demo-backend
+    tag: "1.0"
+    pullPolicy: IfNotPresent
+  replicas: 2
+  service:
+    type: NodePort
+    port: 80
+    nodePort: 30086
+  env:
+    GREETING: "hello from dev"
+    APP_ENV: "dev"
+
+frontend:
+  image:
+    repository: k8s-demo-frontend
+    tag: "1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    type: NodePort
+    port: 80
+    nodePort: 30087

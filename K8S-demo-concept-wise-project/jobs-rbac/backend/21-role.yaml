@@ -1,0 +1,26 @@
+# Role: a list of allowed verbs on resources, scoped to ONE namespace.
+# ClusterRole would do the same thing but cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+  namespace: team-alpha
+rules:
+  - apiGroups: [""]              # "" means the core API group (v1)
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+# RoleBinding: ties a Role to a subject (ServiceAccount, User, or Group).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-reader-binding
+  namespace: team-alpha
+subjects:
+  - kind: ServiceAccount
+    name: pod-reader
+    namespace: team-alpha
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-reader

@@ -1,0 +1,14 @@
+Thanks for installing {{ .Chart.Name }} ({{ .Chart.Version }}).
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Backend Service: {{ .Release.Name }}-backend  (NodePort {{ .Values.backend.service.nodePort }})
+Frontend Service: {{ .Release.Name }}-frontend (NodePort {{ .Values.frontend.service.nodePort }})
+
+Try it:
+  curl http://$(minikube ip):{{ .Values.backend.service.nodePort }}
+  open http://$(minikube ip):{{ .Values.frontend.service.nodePort }}
+
+Show all resources:
+  kubectl get all -l app.kubernetes.io/instance={{ .Release.Name }}

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>K8s Services Demo - Frontend</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    button { padding: 8px 16px; cursor: pointer; }
+    input { padding: 6px; width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>Kubernetes Services Demo</h1>
+  <p>Hit the backend via its Service. Try ClusterIP (in-cluster) and NodePort (from your laptop).</p>
+  <label>Backend URL:</label>
+  <input id="url" value="http://localhost:30080" />
+  <br /><br />
+  <button onclick="callBackend()">Call backend</button>
+  <button onclick="spam(20)">Call 20x</button>
+  <pre id="out">Click a button.</pre>
+
+  <script>
+    async function callBackend() {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      try {
+        const r = await fetch(url);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+    async function spam(n) {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      const hosts = [];
+      for (let i = 0; i < n; i++) {
+        const r = await fetch(url);
+        const j = await r.json();
+        hosts.push(j.hostname);
+      }
+      out.textContent = 'Hostnames seen (Service load-balanced across Pods):\n' + hosts.join('\n');
+    }
+  </script>
+</body>
+</html>

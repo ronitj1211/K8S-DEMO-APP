@@ -1,0 +1,78 @@
+# A StatefulSet gives each Pod:
+#   - a stable, predictable name (counter-0, counter-1, counter-2)
+#   - a stable DNS hostname under the headless Service
+#   - its OWN PersistentVolumeClaim, created automatically from volumeClaimTemplates
+#   - ordered start/stop/update (counter-0 first, then -1, then -2)
+apiVersion: v1
+kind: Service
+metadata:
+  name: counter            # headless Service: gives each Pod a DNS name
+  labels:
+    app: counter
+spec:
+  clusterIP: None          # "headless"
+  selector:
+    app: counter
+  ports:
+    - port: 80
+      targetPort: 3000
+      name: http
+---
+# A second, regular Service for outside callers (load-balanced across replicas).
+apiVersion: v1
+kind: Service
+metadata:
+  name: counter-lb
+spec:
+  type: NodePort
+  selector:
+    app: counter
+  ports:
+    - port: 80
+      targetPort: 3000
+      nodePort: 30093
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: counter
+spec:
+  serviceName: counter           # MUST match the headless Service name above
+  replicas: 3
+  selector:
+    matchLabels:
+      app: counter
+  template:
+    metadata:
+      labels:
+        app: counter
+    spec:
+      containers:
+        - name: app
+          image: stateful-counter:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data           # mounts the PVC named below
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+  # ONE PVC PER POD, created automatically. PVC names will be:
+  #   data-counter-0, data-counter-1, data-counter-2
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # storageClassName: demo-standard   # uncomment to use the SC above
+        resources:
+          requests:
+            storage: 1Gi

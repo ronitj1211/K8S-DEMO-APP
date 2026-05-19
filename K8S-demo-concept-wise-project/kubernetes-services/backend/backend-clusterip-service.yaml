@@ -1,0 +1,14 @@
+# ClusterIP: default Service type. Reachable ONLY from inside the cluster
+# at the DNS name `backend-clusterip.<namespace>.svc.cluster.local` (or just
+# `backend-clusterip` from the same namespace).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-clusterip
+spec:
+  type: ClusterIP
+  selector:
+    app: backend          # picks any Pod with label app=backend
+  ports:
+    - port: 80            # the Service port (other Pods call this)
+      targetPort: 3000    # the container port on the Pod

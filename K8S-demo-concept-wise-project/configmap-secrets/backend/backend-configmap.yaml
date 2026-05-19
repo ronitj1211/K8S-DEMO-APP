@@ -1,0 +1,14 @@
+# Non-sensitive configuration: key/value pairs and a whole file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+data:
+  APP_NAME: "k8s-demo-backend"
+  LOG_LEVEL: "debug"
+  GREETING: "hello"
+  # A multi-line "file" — useful for app.conf, nginx.conf, etc.
+  app.conf: |
+    # mounted as /etc/config/app.conf
+    feature_flags=new_ui,beta_search
+    cache_ttl=60

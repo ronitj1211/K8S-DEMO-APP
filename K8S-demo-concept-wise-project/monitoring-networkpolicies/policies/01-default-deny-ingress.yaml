@@ -1,0 +1,14 @@
+# Default-deny: once applied, NO incoming traffic is allowed to ANY Pod in
+# the demo namespace, unless another NetworkPolicy explicitly allows it.
+#
+# Outgoing traffic is still open (this is INGRESS-only deny).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: demo
+spec:
+  podSelector: {}             # matches ALL Pods in the namespace
+  policyTypes:
+    - Ingress
+  # ingress: []   <-- no rules == deny all ingress

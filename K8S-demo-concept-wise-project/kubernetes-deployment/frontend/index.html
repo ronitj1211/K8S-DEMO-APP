@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>K8s Deployment Demo - Frontend</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    button { padding: 8px 16px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Kubernetes Deployment Demo</h1>
+  <p>Repeatedly call the backend. You should see the <code>hostname</code> rotate across replicas.</p>
+  <button onclick="callBackend()">Call backend</button>
+  <button onclick="spam(20)">Call 20x</button>
+  <pre id="out">Click a button.</pre>
+
+  <script>
+    const BACKEND_URL = window.BACKEND_URL || 'http://localhost:3000';
+    async function callBackend() {
+      const out = document.getElementById('out');
+      try {
+        const r = await fetch(BACKEND_URL);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+    async function spam(n) {
+      const out = document.getElementById('out');
+      const hosts = [];
+      for (let i = 0; i < n; i++) {
+        const r = await fetch(BACKEND_URL);
+        const j = await r.json();
+        hosts.push(j.hostname);
+      }
+      out.textContent = 'Hostnames seen:\n' + hosts.join('\n');
+    }
+  </script>
+</body>
+</html>

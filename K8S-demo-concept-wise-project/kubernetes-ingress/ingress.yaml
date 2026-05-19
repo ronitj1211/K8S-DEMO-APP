@@ -1,0 +1,33 @@
+# Single Ingress that routes:
+#   demo.local/        -> frontend Service
+#   demo.local/api     -> backend  Service (path rewritten to /)
+#
+# Requires an Ingress controller in the cluster. For minikube:
+#   minikube addons enable ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+  annotations:
+    # NGINX Ingress: strip the /api prefix before forwarding to backend
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: demo.local
+      http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

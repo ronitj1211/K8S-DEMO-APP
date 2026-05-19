@@ -1,0 +1,37 @@
+# A Job that PROVES the RBAC works: it runs as the pod-reader SA and
+# calls the K8s API to list pods. It also tries to list secrets, which
+# should FAIL (forbidden) — that's the point.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rbac-test
+  namespace: team-alpha
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      serviceAccountName: pod-reader    # use our SA, not "default"
+      restartPolicy: Never
+      containers:
+        - name: api
+          image: curlimages/curl:8.8.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              API=https://kubernetes.default.svc
+
+              echo "=== should SUCCEED: list pods in team-alpha ==="
+              curl -sS --cacert $CA -H "Authorization: Bearer $TOKEN" \
+                $API/api/v1/namespaces/team-alpha/pods | head -c 400 ; echo
+              echo
+
+              echo "=== should FAIL with 403: list secrets in team-alpha ==="
+              curl -sS --cacert $CA -H "Authorization: Bearer $TOKEN" \
+                $API/api/v1/namespaces/team-alpha/secrets | head -c 400 ; echo
+              echo
+
+              echo "=== should FAIL with 403: list pods in team-beta ==="
+              curl -sS --cacert $CA -H "Authorization: Bearer $TOKEN" \
+                $API/api/v1/namespaces/team-beta/pods | head -c 400 ; echo

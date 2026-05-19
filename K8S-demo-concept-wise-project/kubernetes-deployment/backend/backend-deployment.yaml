@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  labels:
+    app: backend
+spec:
+  replicas: 3                        # run 3 Pods at all times
+  strategy:
+    type: RollingUpdate              # default; replace Pods gradually on update
+    rollingUpdate:
+      maxSurge: 1                    # allow 1 extra Pod above replicas during rollout
+      maxUnavailable: 0              # never have fewer than replicas available
+  selector:
+    matchLabels:
+      app: backend                   # MUST match template.metadata.labels below
+  template:
+    metadata:
+      labels:
+        app: backend                 # label applied to the Pods this Deployment creates
+    spec:
+      containers:
+        - name: backend
+          image: k8s-demo-backend:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: APP_VERSION
+              value: "v1"
+          readinessProbe:            # only send traffic when Pod can serve
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:             # restart container if it locks up
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10

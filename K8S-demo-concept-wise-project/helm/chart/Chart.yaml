@@ -1,0 +1,11 @@
+apiVersion: v2
+name: k8s-demo
+description: A demo Helm chart that deploys a Node backend + nginx frontend.
+type: application
+version: 0.1.0           # chart version (bump on chart changes)
+appVersion: "1.0.0"      # app version (informational)
+keywords:
+  - demo
+  - learning
+maintainers:
+  - name: you

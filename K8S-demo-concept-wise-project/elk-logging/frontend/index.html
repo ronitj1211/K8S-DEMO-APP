@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ELK Demo - Log Generator</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; }
+    input { padding: 6px; width: 100%; }
+    button { padding: 8px 16px; cursor: pointer; margin-right: 6px; }
+    .row { margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>EFK Logging Demo</h1>
+  <p>Generate logs of different levels. Then go to <strong>Kibana</strong> to see them.</p>
+  <label>Backend URL:</label>
+  <input id="url" value="http://localhost:30090" />
+  <div class="row">
+    <button onclick="hit('/')">Generate INFO</button>
+    <button onclick="hit('/warn')">Generate WARN</button>
+    <button onclick="hit('/error')">Generate ERROR</button>
+    <button onclick="spam(20)">Spam 20 mixed</button>
+  </div>
+  <pre id="out">Click a button.</pre>
+
+  <script>
+    async function hit(path) {
+      const url = document.getElementById('url').value + path;
+      const out = document.getElementById('out');
+      try {
+        const r = await fetch(url);
+        out.textContent = `${r.status} ${url}\n` + await r.text();
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+    async function spam(n) {
+      const base = document.getElementById('url').value;
+      const paths = ['/', '/warn', '/error'];
+      for (let i = 0; i < n; i++) {
+        await fetch(base + paths[i % paths.length]).catch(() => {});
+      }
+      document.getElementById('out').textContent = `Sent ${n} requests. Check Kibana.`;
+    }
+  </script>
+</body>
+</html>
