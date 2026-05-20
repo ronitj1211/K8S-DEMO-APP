@@ -5,6 +5,11 @@ const os = require('os');
 const app = express();
 const PORT = 3000;
 
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+});
+
 app.get('/', (req, res) => {
   res.json({ hostname: os.hostname(), msg: 'hit /burn?ms=500 to drive CPU up' });
 });
