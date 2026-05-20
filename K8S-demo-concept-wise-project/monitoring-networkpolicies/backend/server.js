@@ -23,6 +23,7 @@ const requestDuration = new client.Histogram({
 });
 
 app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   const end = requestDuration.startTimer({ route: req.path });
   res.on('finish', () => {
     end();
