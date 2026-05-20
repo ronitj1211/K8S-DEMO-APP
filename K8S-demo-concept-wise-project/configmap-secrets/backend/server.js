@@ -5,6 +5,11 @@ const fs = require('fs');
 const app = express();
 const PORT = 3000;
 
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+});
+
 // Config from env vars (sourced from ConfigMap + Secret).
 const APP_NAME = process.env.APP_NAME || 'unknown';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
