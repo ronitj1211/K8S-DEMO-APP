@@ -4,6 +4,11 @@ const os = require('os');
 const app = express();
 const PORT = 3000;
 
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+});
+
 // The version field is set via env in the Deployment manifest. Bump it in Git
 // and push — Argo CD will detect the drift and roll Pods to the new version.
 const VERSION = process.env.APP_VERSION || 'v1';
