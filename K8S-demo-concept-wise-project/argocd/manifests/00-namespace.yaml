@@ -1,0 +1,7 @@
+# The namespace the demo app will live in. Created by Argo CD because the
+# Application sets syncOptions: CreateNamespace=true, but having it in Git
+# too is harmless and makes intent explicit.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd-demo

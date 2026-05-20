@@ -1,0 +1,30 @@
+# App-of-Apps pattern: one Argo CD Application points at a Git folder full of
+# OTHER Argo CD Application manifests. Useful when you have many apps and
+# don't want to `kubectl apply` each one by hand. Apply this ONE manifest and
+# Argo CD discovers and manages everything inside the path.
+#
+# To use this for the demo:
+#   1. Put more Application YAMLs alongside demo-app.yaml under apps/.
+#   2. Apply only this one. The rest get created automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-app                 # by convention named root-app / bootstrap
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ronitj1211/K8S-DEMO-APP.git
+    targetRevision: main
+    path: K8S-demo-concept-wise-project/argocd/apps    # folder of Application YAMLs
+    directory:
+      recurse: true              # also look in subfolders
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

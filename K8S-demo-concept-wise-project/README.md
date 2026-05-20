@@ -35,6 +35,12 @@ The app is intentionally the same simple Node.js backend + HTML frontend everywh
 | 11 | **Logging (EFK)** | [elk-logging](./elk-logging/) | Elasticsearch + Fluent Bit (DaemonSet) + Kibana. Centralized log collection from every Pod. |
 | 12 | **Monitoring + NetworkPolicies** | [monitoring-networkpolicies](./monitoring-networkpolicies/) | Prometheus + Grafana scraping `/metrics`; default-deny + allow-list NetworkPolicies. |
 
+### Part D — GitOps & delivery
+
+| # | Concept | Folder | What you'll learn |
+|---|---------|--------|-------------------|
+| 13 | **GitOps with Argo CD** | [argocd](./argocd/) | Declarative CD from Git. Application CRD, auto-sync, self-heal, prune, App of Apps pattern. |
+
 The order is cumulative — each concept builds on the previous ones. You can jump to a specific folder if you already know the earlier material.
 
 ---
@@ -209,7 +215,7 @@ You've covered the core, plus storage, scaling, security, and observability. Nat
 - **Service mesh** (Istio, Linkerd, Cilium) — mTLS, advanced traffic management, L7 policies.
 - **Vertical Pod Autoscaler (VPA)** and **Cluster Autoscaler / Karpenter** — auto-size Pods and the cluster itself.
 - **KEDA** — event-driven autoscaling on queue depth, Kafka lag, custom metrics.
-- **GitOps with Argo CD or Flux** — declarative cluster state from git.
+- **Flux** — an alternative GitOps controller (you've already covered Argo CD in [argocd](./argocd/)).
 - **Policy as code**: OPA Gatekeeper / Kyverno for cluster-wide policy enforcement.
 - **Distributed tracing** with Tempo / Jaeger / OpenTelemetry — to round out logs + metrics.
 - **Backup**: Velero for cluster + PV backups.

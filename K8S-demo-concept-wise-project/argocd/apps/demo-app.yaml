@@ -1,0 +1,47 @@
+# The Argo CD `Application` is the link between Git and the cluster.
+# It says: "watch this path in this Git repo and make the cluster match it."
+#
+# Apply this manifest into the `argocd` namespace. Argo CD's controller picks
+# it up and starts syncing.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app
+  namespace: argocd                # Argo CD itself lives here
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io     # delete app -> delete managed resources
+spec:
+  project: default                  # default AppProject; create your own for multi-tenant
+
+  source:
+    # Public repo — no auth needed. For private repos:
+    #   argocd repo add git@... --ssh-private-key-path ~/.ssh/id_ed25519
+    repoURL: https://github.com/ronitj1211/K8S-DEMO-APP.git
+    targetRevision: main            # branch, tag, or commit SHA
+    path: K8S-demo-concept-wise-project/argocd/manifests
+    # For Helm charts:
+    #   helm:
+    #     valueFiles: [values-prod.yaml]
+    # For Kustomize:
+    #   kustomize:
+    #     namePrefix: prod-
+
+  destination:
+    server: https://kubernetes.default.svc   # the cluster Argo CD itself runs on
+    namespace: argocd-demo                   # where the workloads land
+
+  syncPolicy:
+    automated:
+      prune: true        # delete resources removed from Git (otherwise they linger)
+      selfHeal: true     # revert manual changes — Git is the source of truth
+      allowEmpty: false  # don't sync if there are 0 resources (safety against rm -rf)
+    syncOptions:
+      - CreateNamespace=true        # create `argocd-demo` if it doesn't exist
+      - PrunePropagationPolicy=foreground
+      - ServerSideApply=true        # safer for large manifests (CRDs, etc.)
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
