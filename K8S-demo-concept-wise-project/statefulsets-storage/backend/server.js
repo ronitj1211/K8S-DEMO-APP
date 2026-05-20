@@ -5,6 +5,13 @@ const path = require('path');
 
 const app = express();
 const PORT = 3000;
+
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST');
+  next();
+});
+
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const COUNTER_FILE = path.join(DATA_DIR, 'counter.txt');
 
