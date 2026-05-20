@@ -6,6 +6,11 @@ const os = require('os');
 const app = express();
 const PORT = 3000;
 
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+});
+
 app.get('/', (req, res) => {
   res.json({
     message: 'Jobs/RBAC demo backend',
