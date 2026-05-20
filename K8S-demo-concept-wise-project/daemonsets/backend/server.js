@@ -5,6 +5,11 @@ const fs = require('fs');
 const app = express();
 const PORT = 3000;
 
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+});
+
 const NODE_NAME = process.env.NODE_NAME || 'unknown';
 
 // Tail the last lines from a host log file (mounted from the node).
