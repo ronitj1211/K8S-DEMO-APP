@@ -149,6 +149,9 @@ For `sample-app`:
 | `log_processed.msg` | `handled request`, `simulated error` |
 | `log_processed.path` | `/`, `/warn`, `/error` |
 | `log_processed.code` | `E_DEMO` (only on error records) |
+| `log_processed.ip` | client IP (from `X-Forwarded-For` if set; else the TCP peer). Best "who called us" field. |
+| `log_processed.remoteAddr` | Actual TCP peer — usually the K8s node's cluster IP (`::ffff:10.42.0.1`) because kube-proxy SNATs external traffic. |
+| `log_processed.xForwardedFor` | Raw `X-Forwarded-For` header, if the caller set one. |
 
 For `orders-service`:
 
@@ -161,8 +164,27 @@ For `orders-service`:
 | `log_processed.amount` | numeric |
 | `log_processed.code` | `CARD_DECLINED` (only on failures) |
 | `log_processed.gateway` | `stripe` |
+| `log_processed.ip` | client IP (from XFF if set; else TCP peer) |
+| `log_processed.remoteAddr` | actual TCP peer |
+| `log_processed.xForwardedFor` | raw XFF header |
 
 **Different services can carry different fields in the same index** — Elasticsearch is schema-flexible.
+
+---
+
+### Seeing client IPs
+
+After a code refresh (both apps now have `app.set('trust proxy', true)` and log `req.ip`, `req.socket.remoteAddress`, and the raw `X-Forwarded-For` header):
+
+1. **Refresh the field list** — Kibana caches field names. Go to **☰ → Stack Management → Data Views → `k8s-logs`**, click **↻ Refresh field list** (top-right).
+2. In Discover, search the sidebar for `log_processed.ip` — add it as a column.
+3. Test with a simulated client IP:
+   ```bash
+   curl -H "X-Forwarded-For: 203.0.113.42" http://localhost:30090/
+   ```
+4. Refresh Discover — you should see `log_processed.ip: 203.0.113.42` on that record.
+
+Without an XFF header, `log_processed.ip` shows the cluster node IP (e.g. `::ffff:10.42.0.1`) because kube-proxy SNATs external traffic. That's the correct K8s behavior — behind a real LB (ALB / ingress-nginx) the LB sets XFF to the real client, and this code picks it up.
 
 ---
 

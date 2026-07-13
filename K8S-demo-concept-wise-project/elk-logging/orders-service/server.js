@@ -7,8 +7,17 @@ const os = require('os');
 const app = express();
 const PORT = 3000;
 
-// 'service' is a fixed field on every log line — easiest way to tell apps apart
-// in Kibana when an org has dozens of microservices.
+app.set('trust proxy', true);
+
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  return {
+    ip: req.ip,
+    remoteAddr: req.socket.remoteAddress,
+    xForwardedFor: xff || null,
+  };
+}
+
 function log(level, msg, extra = {}) {
   console.log(JSON.stringify({
     timestamp: new Date().toISOString(),
@@ -29,17 +38,17 @@ app.post('/orders', (req, res) => {
   const orderId = `ord_${++nextOrderId}`;
   const customerId = customers[Math.floor(Math.random() * customers.length)];
   const amount = Math.round(Math.random() * 10000) / 100;
-  log('info', 'order created', { orderId, customerId, amount, action: 'create' });
+  log('info', 'order created', { orderId, customerId, amount, action: 'create', ...clientIp(req) });
   res.status(201).json({ orderId, customerId, amount });
 });
 
 app.get('/orders/:id', (req, res) => {
   const found = Math.random() > 0.2;
   if (!found) {
-    log('warn', 'order not found', { orderId: req.params.id, action: 'lookup' });
+    log('warn', 'order not found', { orderId: req.params.id, action: 'lookup', ...clientIp(req) });
     return res.status(404).json({ error: 'not found' });
   }
-  log('info', 'order fetched', { orderId: req.params.id, action: 'lookup' });
+  log('info', 'order fetched', { orderId: req.params.id, action: 'lookup', ...clientIp(req) });
   res.json({ orderId: req.params.id, status: 'shipped' });
 });
 
@@ -53,6 +62,7 @@ app.post('/payments/charge', (req, res) => {
       action: 'charge',
       code: 'CARD_DECLINED',
       gateway: 'stripe',
+      ...clientIp(req),
     });
     return res.status(402).json({ error: 'declined' });
   }
@@ -61,6 +71,7 @@ app.post('/payments/charge', (req, res) => {
     action: 'charge',
     amount: Math.round(Math.random() * 5000) / 100,
     gateway: 'stripe',
+    ...clientIp(req),
   });
   res.json({ orderId, status: 'paid' });
 });

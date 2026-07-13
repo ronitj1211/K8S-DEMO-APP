@@ -4,8 +4,17 @@ const os = require('os');
 const app = express();
 const PORT = 3000;
 
-// Structured JSON logs to stdout — Fluent Bit will pick these up from
-// /var/log/containers/<pod>_<ns>_<container>-<id>.log on each node.
+app.set('trust proxy', true);
+
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  return {
+    ip: req.ip,
+    remoteAddr: req.socket.remoteAddress,
+    xForwardedFor: xff || null,
+  };
+}
+
 function log(level, msg, extra = {}) {
   console.log(JSON.stringify({
     timestamp: new Date().toISOString(),
@@ -17,17 +26,17 @@ function log(level, msg, extra = {}) {
 }
 
 app.get('/', (req, res) => {
-  log('info', 'handled request', { path: req.path, ip: req.ip });
+  log('info', 'handled request', { path: req.path, ...clientIp(req) });
   res.json({ ok: true, hostname: os.hostname() });
 });
 
 app.get('/warn', (req, res) => {
-  log('warn', 'something looked off', { path: req.path });
+  log('warn', 'something looked off', { path: req.path, ...clientIp(req) });
   res.json({ ok: true });
 });
 
 app.get('/error', (req, res) => {
-  log('error', 'simulated error', { path: req.path, code: 'E_DEMO' });
+  log('error', 'simulated error', { path: req.path, code: 'E_DEMO', ...clientIp(req) });
   res.status(500).json({ ok: false });
 });
 
