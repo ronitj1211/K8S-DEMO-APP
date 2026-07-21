@@ -1,0 +1,54 @@
+# Security scanning — Trivy on Docker image + Dependency Review on PRs.
+# Fails the build on HIGH/CRITICAL vulnerabilities.
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1'   # weekly Monday 04:00 UTC
+
+permissions:
+  contents: read
+  security-events: write    # upload SARIF to Security tab
+  pull-requests: read
+
+jobs:
+  scan-code:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  scan-image:
+    name: Trivy image scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (no push, for scan only)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true               # load into local docker instead of pushing
+          tags: local/image:scan
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/image:scan
+          format: sarif
+          output: trivy.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'           # fail the job
+
+      - name: Upload SARIF to Security tab
+        if: always()               # even on scan failure — we want the report
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
