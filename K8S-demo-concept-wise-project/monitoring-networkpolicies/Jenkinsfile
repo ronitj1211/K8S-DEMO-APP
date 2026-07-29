@@ -1,0 +1,134 @@
+// Jenkins declarative pipeline for the monitoring-networkpolicies demo.
+//
+// Two concerns bundled: Prometheus+Grafana stack and NetworkPolicy enforcement.
+// Deploys everything then verifies:
+//   - Prometheus scraping the backend
+//   - NetworkPolicy allow rules working
+//
+// Apply order matters: namespaces → monitoring → workloads → policies (deny last).
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY      = 'ghcr.io/ronitj1211'
+        BACKEND_IMG   = "${REGISTRY}/monitoring-backend"
+        FRONTEND_IMG  = "${REGISTRY}/monitoring-frontend"
+        IMAGE_TAG     = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        MANIFEST_DIR  = 'K8S-demo-concept-wise-project/monitoring-networkpolicies'
+    }
+
+    options { timeout(time: 25, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BACKEND_IMG}:${IMAGE_TAG}"  -t "${BACKEND_IMG}:latest"  "${MANIFEST_DIR}/backend"
+                      docker build -t "${FRONTEND_IMG}:${IMAGE_TAG}" -t "${FRONTEND_IMG}:latest" "${MANIFEST_DIR}/frontend"
+                      docker push  "${BACKEND_IMG}:${IMAGE_TAG}";  docker push "${BACKEND_IMG}:latest"
+                      docker push  "${FRONTEND_IMG}:${IMAGE_TAG}"; docker push "${FRONTEND_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Monitoring stack (Prometheus + Grafana)') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl apply -f ${MANIFEST_DIR}/stack/00-namespaces.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/10-prometheus-rbac.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/11-prometheus-config.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/12-prometheus.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/20-grafana.yaml
+
+                      kubectl -n monitoring rollout status deployment/prometheus --timeout=5m
+                      kubectl -n monitoring rollout status deployment/grafana    --timeout=5m
+                    """
+                }
+            }
+        }
+
+        stage('Demo apps (before NetworkPolicies)') {
+            // Apply apps FIRST so Prometheus can scrape them once they exist.
+            // Apply deny-all policy LAST so we can watch the transition.
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n demo apply -f ${MANIFEST_DIR}/backend/01-app.yaml
+                      kubectl -n demo apply -f ${MANIFEST_DIR}/frontend/frontend.yaml
+
+                      kubectl -n demo set image deployment/backend  backend=${BACKEND_IMG}:${IMAGE_TAG}   --record
+                      kubectl -n demo set image deployment/frontend ui=${FRONTEND_IMG}:${IMAGE_TAG}      --record
+
+                      kubectl -n demo rollout status deployment/backend  --timeout=5m
+                      kubectl -n demo rollout status deployment/frontend --timeout=5m
+                    """
+                }
+            }
+        }
+
+        stage('Verify Prometheus scraping') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                      # Wait for Prometheus to notice the backend Pods via SD
+                      for i in $(seq 1 12); do
+                        UP=$(kubectl -n monitoring exec deployment/prometheus -- \
+                          wget -qO- 'http://localhost:9090/api/v1/query?query=up{app="backend"}' \
+                          | grep -o '"value":\\[[^]]*\\]' | wc -l)
+                        [ "$UP" -ge 1 ] && { echo "✅ Prometheus has $UP up{app=backend} samples"; exit 0; }
+                        echo "waiting for Prometheus scrapes ($i/12)..."
+                        sleep 10
+                      done
+                      echo "❌ Prometheus never scraped the backend"
+                      exit 1
+                    '''
+                }
+            }
+        }
+
+        stage('Apply NetworkPolicies') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      # Order matters here too:
+                      # - allow rules FIRST (so nothing breaks the moment deny is applied)
+                      # - deny-all LAST
+                      kubectl -n demo apply -f ${MANIFEST_DIR}/policies/02-allow-frontend-to-backend.yaml
+                      kubectl -n demo apply -f ${MANIFEST_DIR}/policies/03-allow-prometheus-scrape.yaml
+                      kubectl -n demo apply -f ${MANIFEST_DIR}/policies/01-default-deny-ingress.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Verify policies enforce') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                      # Probe from `default` ns should be BLOCKED
+                      set +e
+                      kubectl run probe-$RANDOM -n default --rm -i --restart=Never --image=curlimages/curl \
+                        --command -- sh -c 'curl -s --max-time 3 http://backend.demo.svc/ && exit 1 || exit 0'
+                      EXIT_CODE=$?
+                      set -e
+                      [ $EXIT_CODE -eq 0 ] && echo "✅ default→backend correctly blocked" || { echo "❌ policy not enforced"; exit 1; }
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

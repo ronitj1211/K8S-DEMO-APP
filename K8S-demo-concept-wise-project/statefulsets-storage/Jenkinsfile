@@ -1,0 +1,128 @@
+// Jenkins declarative pipeline for the statefulsets-storage demo.
+//
+// StatefulSet updates roll from highest ordinal down: sts-2, then sts-1, then sts-0.
+// The rollout halts if any Pod fails to become Ready — this is deliberate protection
+// against wrecking the whole cluster on a bad image.
+//
+// We use `partition` for a safer canary-ish rollout: partition=N means only Pods
+// with ordinal >= N are updated. Start with high partition, verify, drop it.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY      = 'ghcr.io/ronitj1211'
+        COUNTER_IMG   = "${REGISTRY}/stateful-counter"
+        UI_IMG        = "${REGISTRY}/stateful-counter-ui"
+        IMAGE_TAG     = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE     = 'default'
+        MANIFEST_DIR  = 'K8S-demo-concept-wise-project/statefulsets-storage'
+    }
+
+    options { timeout(time: 25, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${COUNTER_IMG}:${IMAGE_TAG}" -t "${COUNTER_IMG}:latest" "${MANIFEST_DIR}/backend"
+                      docker build -t "${UI_IMG}:${IMAGE_TAG}"      -t "${UI_IMG}:latest"      "${MANIFEST_DIR}/frontend"
+                      docker push  "${COUNTER_IMG}:${IMAGE_TAG}"; docker push "${COUNTER_IMG}:latest"
+                      docker push  "${UI_IMG}:${IMAGE_TAG}";      docker push "${UI_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Apply StatefulSet + frontend') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/02-statefulset.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/frontend/frontend.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Canary — roll only counter-2 first (partition=2)') {
+            // With partition=2, only Pods with ordinal >= 2 are updated.
+            // For a 3-replica STS: only counter-2 gets the new image.
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} patch statefulset counter --type=json -p='[
+                        {"op":"add","path":"/spec/updateStrategy/rollingUpdate","value":{"partition":2}}
+                      ]' || true
+
+                      kubectl -n ${NAMESPACE} set image statefulset/counter app=${COUNTER_IMG}:${IMAGE_TAG}
+                      kubectl -n ${NAMESPACE} rollout status statefulset/counter --timeout=3m
+                    """
+                }
+            }
+        }
+
+        stage('Verify canary Pod (counter-2) is healthy') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      # counter-2 should be on the new image, counter-1 and counter-0 on the old.
+                      kubectl -n ${NAMESPACE} get pod counter-2 -o jsonpath='{.spec.containers[0].image}' | grep -q "${IMAGE_TAG}"
+                      kubectl -n ${NAMESPACE} exec counter-2 -- wget -qO- http://localhost:3000/health | grep -q ok
+                      echo '✅ canary counter-2 is healthy on new image'
+                    """
+                }
+            }
+        }
+
+        stage('Full rollout (partition=0)') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} patch statefulset counter --type=json -p='[
+                        {"op":"replace","path":"/spec/updateStrategy/rollingUpdate/partition","value":0}
+                      ]'
+                      kubectl -n ${NAMESPACE} rollout status statefulset/counter --timeout=10m
+                    """
+                }
+            }
+        }
+
+        stage('Verify all replicas + PVCs') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      # All 3 Pods on new image
+                      for i in 0 1 2; do
+                        IMAGE=\$(kubectl -n ${NAMESPACE} get pod counter-\$i -o jsonpath='{.spec.containers[0].image}')
+                        echo "counter-\$i uses \$IMAGE"
+                        echo "\$IMAGE" | grep -q "${IMAGE_TAG}" || { echo "❌ counter-\$i not on new image"; exit 1; }
+                      done
+
+                      # PVCs still bound
+                      kubectl -n ${NAMESPACE} get pvc -l app=counter -o custom-columns=NAME:.metadata.name,STATUS:.status.phase
+                      kubectl -n ${NAMESPACE} get pvc -l app=counter -o jsonpath='{.items[*].status.phase}' | grep -qv Pending
+                      echo '✅ StatefulSet fully rolled + PVCs intact'
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                sh "kubectl -n ${NAMESPACE} rollout undo statefulset/counter || true"
+                sh "kubectl -n ${NAMESPACE} rollout undo deployment/counter-ui || true"
+            }
+        }
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

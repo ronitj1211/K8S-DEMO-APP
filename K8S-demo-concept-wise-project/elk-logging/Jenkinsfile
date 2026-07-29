@@ -1,0 +1,138 @@
+// Jenkins declarative pipeline for the elk-logging demo.
+//
+// Order matters:
+//   1. namespace
+//   2. Elasticsearch (StatefulSet) — everything else needs it up
+//   3. Kibana — after ES is Ready
+//   4. Fluent Bit DaemonSet — starts shipping to ES
+//   5. Demo apps (sample-app, orders-service, frontend)
+//
+// This stack is memory-heavy (~3 GB) — verify cluster has capacity before running.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY       = 'ghcr.io/ronitj1211'
+        SAMPLE_IMG     = "${REGISTRY}/elk-demo-backend"
+        ORDERS_IMG     = "${REGISTRY}/orders-service"
+        UI_IMG         = "${REGISTRY}/elk-demo-frontend"
+        IMAGE_TAG      = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        MANIFEST_DIR   = 'K8S-demo-concept-wise-project/elk-logging'
+    }
+
+    options { timeout(time: 30, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Build & push all 3 app images') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${SAMPLE_IMG}:${IMAGE_TAG}" -t "${SAMPLE_IMG}:latest" "${MANIFEST_DIR}/backend"
+                      docker build -t "${ORDERS_IMG}:${IMAGE_TAG}" -t "${ORDERS_IMG}:latest" "${MANIFEST_DIR}/orders-service"
+                      docker build -t "${UI_IMG}:${IMAGE_TAG}"     -t "${UI_IMG}:latest"     "${MANIFEST_DIR}/frontend"
+                      docker push  "${SAMPLE_IMG}:${IMAGE_TAG}"; docker push "${SAMPLE_IMG}:latest"
+                      docker push  "${ORDERS_IMG}:${IMAGE_TAG}"; docker push "${ORDERS_IMG}:latest"
+                      docker push  "${UI_IMG}:${IMAGE_TAG}";     docker push "${UI_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Namespaces + Elasticsearch') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl apply -f ${MANIFEST_DIR}/stack/00-namespace.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/10-elasticsearch.yaml
+
+                      # ES pull is ~1.28 GB — allow generous timeout
+                      kubectl -n logging wait --for=condition=ready pod -l app=elasticsearch --timeout=10m
+                    """
+                }
+            }
+        }
+
+        stage('Kibana') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl apply -f ${MANIFEST_DIR}/stack/20-kibana.yaml
+                      kubectl -n logging wait --for=condition=ready pod -l app=kibana --timeout=10m
+                    """
+                }
+            }
+        }
+
+        stage('Fluent Bit DaemonSet') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl apply -f ${MANIFEST_DIR}/stack/30-fluent-bit-rbac.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/31-fluent-bit-config.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/stack/32-fluent-bit-daemonset.yaml
+                      kubectl -n logging rollout status daemonset/fluent-bit --timeout=3m
+                    """
+                }
+            }
+        }
+
+        stage('Demo apps') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl apply -f ${MANIFEST_DIR}/backend/sample-app.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/orders-service/orders-service.yaml
+                      kubectl apply -f ${MANIFEST_DIR}/frontend/frontend.yaml
+
+                      kubectl -n demo set image deployment/sample-app     app=${SAMPLE_IMG}:${IMAGE_TAG}   --record
+                      kubectl -n demo set image deployment/orders-service orders=${ORDERS_IMG}:${IMAGE_TAG} --record
+                      kubectl -n demo set image deployment/log-generator-ui ui=${UI_IMG}:${IMAGE_TAG}       --record
+
+                      kubectl -n demo rollout status deployment/sample-app       --timeout=3m
+                      kubectl -n demo rollout status deployment/orders-service   --timeout=3m
+                      kubectl -n demo rollout status deployment/log-generator-ui --timeout=3m
+                    """
+                }
+            }
+        }
+
+        stage('Generate traffic + verify pipeline') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                      # Generate logs
+                      kubectl run traffic-$RANDOM -n demo --rm -i --restart=Never --image=curlimages/curl \
+                        --command -- sh -c '
+                          for i in $(seq 1 20); do
+                            curl -s http://sample-app/ >/dev/null
+                            curl -s http://sample-app/warn >/dev/null
+                            curl -s http://sample-app/error >/dev/null
+                          done
+                        '
+
+                      # Wait for Fluent Bit to ship them, then query ES
+                      sleep 20
+                      TODAY=$(date -u +%Y.%m.%d)
+                      COUNT=$(kubectl -n logging exec elasticsearch-0 -- \
+                        curl -s "http://localhost:9200/k8s-logs-${TODAY}/_count" \
+                        | grep -o '"count":[0-9]*' | cut -d: -f2)
+                      echo "docs in k8s-logs-${TODAY}: $COUNT"
+                      [ "${COUNT:-0}" -gt 0 ] || { echo "❌ no logs in ES"; exit 1; }
+                      echo "✅ pipeline is flowing"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

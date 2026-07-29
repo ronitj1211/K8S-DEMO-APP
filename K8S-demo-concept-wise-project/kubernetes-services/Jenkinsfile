@@ -1,0 +1,115 @@
+// Jenkins declarative pipeline for the kubernetes-services demo.
+//
+// This folder ships a Deployment + Services (ClusterIP, NodePort, LoadBalancer)
+// + frontend Deployment/Service. Services themselves are declarative — apply and
+// they route. The rolling deploy is on the backend Deployment.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY       = 'ghcr.io/ronitj1211'
+        BACKEND_IMAGE  = "${REGISTRY}/k8s-demo-backend"
+        FRONTEND_IMAGE = "${REGISTRY}/k8s-demo-frontend"
+        IMAGE_TAG      = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE      = 'default'
+        MANIFEST_DIR   = 'K8S-demo-concept-wise-project/kubernetes-services'
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER',
+                    passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BACKEND_IMAGE}:${IMAGE_TAG}"  -t "${BACKEND_IMAGE}:latest"  "${MANIFEST_DIR}/backend"
+                      docker build -t "${FRONTEND_IMAGE}:${IMAGE_TAG}" -t "${FRONTEND_IMAGE}:latest" "${MANIFEST_DIR}/frontend"
+                      docker push  "${BACKEND_IMAGE}:${IMAGE_TAG}"
+                      docker push  "${BACKEND_IMAGE}:latest"
+                      docker push  "${FRONTEND_IMAGE}:${IMAGE_TAG}"
+                      docker push  "${FRONTEND_IMAGE}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Apply Services + Deployments') {
+            // Apply Deployments + all three Service types explicitly (avoid `apply -f backend/`
+            // because that folder has a stray package.json that would trip validation).
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-deployment.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-clusterip-service.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-nodeport-service.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-loadbalancer-service.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/frontend/frontend-deployment.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Set new images') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} set image deployment/backend  backend=${BACKEND_IMAGE}:${IMAGE_TAG}  --record
+                      kubectl -n ${NAMESPACE} set image deployment/frontend frontend=${FRONTEND_IMAGE}:${IMAGE_TAG} --record
+                    """
+                }
+            }
+        }
+
+        stage('Wait for rollout + Endpoints') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} rollout status deployment/backend  --timeout=5m
+                      kubectl -n ${NAMESPACE} rollout status deployment/frontend --timeout=5m
+
+                      # Each Service should now have populated Endpoints
+                      for svc in backend-clusterip backend-nodeport backend-lb frontend-nodeport; do
+                        COUNT=\$(kubectl -n ${NAMESPACE} get endpoints \$svc -o jsonpath='{.subsets[*].addresses[*].ip}' | wc -w)
+                        echo "\$svc has \$COUNT endpoints"
+                        [ "\$COUNT" -gt 0 ] || { echo "❌ \$svc has 0 endpoints"; exit 1; }
+                      done
+                    """
+                }
+            }
+        }
+
+        stage('Smoke test via ClusterIP') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} run smoke-\$RANDOM --rm -i --restart=Never --image=curlimages/curl \
+                        --command -- sh -c 'for i in 1 2 3; do curl -s http://backend-clusterip/; done'
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                sh """
+                  kubectl -n ${NAMESPACE} rollout undo deployment/backend  || true
+                  kubectl -n ${NAMESPACE} rollout undo deployment/frontend || true
+                """
+            }
+        }
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

@@ -1,0 +1,141 @@
+// Jenkins declarative pipeline for the configmap-secrets demo.
+//
+// Special consideration: when a ConfigMap or Secret changes, env-var-consumers
+// don't automatically pick up the new value (env is frozen at Pod start).
+// We annotate the Deployment with the CM/Secret's checksum, so any CM/Secret
+// change triggers a rolling restart of the Pods that use it.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY       = 'ghcr.io/ronitj1211'
+        BACKEND_IMAGE  = "${REGISTRY}/k8s-demo-backend"
+        FRONTEND_IMAGE = "${REGISTRY}/k8s-demo-frontend"
+        IMAGE_TAG      = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE      = 'default'
+        MANIFEST_DIR   = 'K8S-demo-concept-wise-project/configmap-secrets'
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER',
+                    passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BACKEND_IMAGE}:${IMAGE_TAG}"  -t "${BACKEND_IMAGE}:latest"  "${MANIFEST_DIR}/backend"
+                      docker build -t "${FRONTEND_IMAGE}:${IMAGE_TAG}" -t "${FRONTEND_IMAGE}:latest" "${MANIFEST_DIR}/frontend"
+                      docker push  "${BACKEND_IMAGE}:${IMAGE_TAG}"; docker push "${BACKEND_IMAGE}:latest"
+                      docker push  "${FRONTEND_IMAGE}:${IMAGE_TAG}"; docker push "${FRONTEND_IMAGE}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Apply ConfigMap + Secret first') {
+            // Order matters — the Deployment references these; they must exist first
+            // or the Pod fails with CreateContainerConfigError.
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-configmap.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-secret.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Compute config checksums') {
+            // Env-var references to a ConfigMap/Secret don't refresh on Pod restart
+            // unless the Pod template changes. We patch a template annotation with
+            // the CM/Secret checksum — a change to either causes a template change,
+            // which triggers a rolling update.
+            steps {
+                script {
+                    env.CM_CHECKSUM = sh(
+                        returnStdout: true,
+                        script: "sha256sum ${MANIFEST_DIR}/backend/backend-configmap.yaml | cut -c1-16"
+                    ).trim()
+                    env.SEC_CHECKSUM = sh(
+                        returnStdout: true,
+                        script: "sha256sum ${MANIFEST_DIR}/backend/backend-secret.yaml | cut -c1-16"
+                    ).trim()
+                    echo "CM checksum:     ${env.CM_CHECKSUM}"
+                    echo "Secret checksum: ${env.SEC_CHECKSUM}"
+                }
+            }
+        }
+
+        stage('Apply Deployments') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-deployment.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/frontend/frontend-deployment.yaml
+
+                      # New image + config checksums on the Pod template annotations.
+                      # Both cause the Deployment to see a template change and roll.
+                      kubectl -n ${NAMESPACE} set image deployment/backend backend=${BACKEND_IMAGE}:${IMAGE_TAG}
+
+                      kubectl -n ${NAMESPACE} patch deployment backend --patch '{
+                        "spec": { "template": { "metadata": { "annotations": {
+                          "checksum/configmap": "${CM_CHECKSUM}",
+                          "checksum/secret":    "${SEC_CHECKSUM}"
+                        }}}}
+                      }'
+
+                      kubectl -n ${NAMESPACE} set image deployment/frontend frontend=${FRONTEND_IMAGE}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Wait for rollout') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} rollout status deployment/backend  --timeout=5m
+                      kubectl -n ${NAMESPACE} rollout status deployment/frontend --timeout=5m
+                    """
+                }
+            }
+        }
+
+        stage('Verify config is loaded') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      POD=\$(kubectl -n ${NAMESPACE} get pod -l app=backend -o jsonpath='{.items[0].metadata.name}')
+                      RESP=\$(kubectl -n ${NAMESPACE} exec \$POD -- wget -qO- http://localhost:3000/)
+                      echo "\$RESP"
+                      # response should include the APP_NAME / GREETING from the ConfigMap and
+                      # a preview of API_KEY from the Secret
+                      echo "\$RESP" | grep -q "hello" && echo "\$RESP" | grep -q "apiKeyPreview"
+                      echo '✅ ConfigMap + Secret values reached the app'
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                sh "kubectl -n ${NAMESPACE} rollout undo deployment/backend  || true"
+                sh "kubectl -n ${NAMESPACE} rollout undo deployment/frontend || true"
+            }
+        }
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

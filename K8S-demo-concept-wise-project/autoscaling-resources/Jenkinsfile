@@ -1,0 +1,113 @@
+// Jenkins declarative pipeline for the autoscaling-resources demo.
+//
+// Deploys the cpu-burner backend + HPA + load-generator UI.
+// Verifies metrics-server is working (HPA needs it) before declaring success.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY      = 'ghcr.io/ronitj1211'
+        BURNER_IMG    = "${REGISTRY}/cpu-burner"
+        UI_IMG        = "${REGISTRY}/cpu-burner-ui"
+        IMAGE_TAG     = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE     = 'default'
+        MANIFEST_DIR  = 'K8S-demo-concept-wise-project/autoscaling-resources'
+    }
+
+    options { timeout(time: 20, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Preflight — metrics-server') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    // HPA needs metrics-server. Fail fast if it's not working.
+                    sh '''
+                      kubectl top nodes >/dev/null 2>&1 || {
+                        echo "❌ metrics-server is not returning data — HPA will be stuck at <unknown>"
+                        echo "   Install: kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+                        exit 1
+                      }
+                      echo "✅ metrics-server responding"
+                    '''
+                }
+            }
+        }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BURNER_IMG}:${IMAGE_TAG}" -t "${BURNER_IMG}:latest" "${MANIFEST_DIR}/backend"
+                      docker build -t "${UI_IMG}:${IMAGE_TAG}"     -t "${UI_IMG}:latest"     "${MANIFEST_DIR}/frontend"
+                      docker push  "${BURNER_IMG}:${IMAGE_TAG}"; docker push "${BURNER_IMG}:latest"
+                      docker push  "${UI_IMG}:${IMAGE_TAG}";     docker push "${UI_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Apply Deployment + HPA + UI') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/01-deployment.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/02-hpa.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/frontend/frontend.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Roll images') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} set image deployment/cpu-burner app=${BURNER_IMG}:${IMAGE_TAG} --record
+                      kubectl -n ${NAMESPACE} set image deployment/load-ui   ui=${UI_IMG}:${IMAGE_TAG}     --record
+                      kubectl -n ${NAMESPACE} rollout status deployment/cpu-burner --timeout=5m
+                      kubectl -n ${NAMESPACE} rollout status deployment/load-ui    --timeout=5m
+                    """
+                }
+            }
+        }
+
+        stage('Verify HPA has metrics') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    // HPA needs ~30s after Pods start for metrics-server to sample.
+                    sh '''
+                      for i in $(seq 1 12); do
+                        TARGETS=$(kubectl -n ${NAMESPACE} get hpa cpu-burner -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}' 2>/dev/null)
+                        if [ -n "$TARGETS" ] && [ "$TARGETS" != "0" ]; then
+                          echo "✅ HPA has metrics: current utilization = ${TARGETS}%"
+                          exit 0
+                        fi
+                        echo "waiting for HPA metrics ($i/12)..."
+                        sleep 10
+                      done
+                      echo "❌ HPA still <unknown> after 2 minutes"
+                      kubectl -n ${NAMESPACE} describe hpa cpu-burner
+                      exit 1
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                sh "kubectl -n ${NAMESPACE} rollout undo deployment/cpu-burner || true"
+                sh "kubectl -n ${NAMESPACE} rollout undo deployment/load-ui    || true"
+            }
+        }
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

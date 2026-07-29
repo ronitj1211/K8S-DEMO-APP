@@ -1,0 +1,131 @@
+// Jenkins declarative pipeline for the helm demo.
+//
+// Uses `helm upgrade --install` (idempotent — install if missing, upgrade if present).
+// Two releases: `demo` (dev values) and `demo-prod` (prod values) — one chart drives both.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY      = 'ghcr.io/ronitj1211'
+        BACKEND_IMG   = "${REGISTRY}/k8s-demo-backend"
+        FRONTEND_IMG  = "${REGISTRY}/k8s-demo-frontend"
+        IMAGE_TAG     = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE     = 'default'
+        MANIFEST_DIR  = 'K8S-demo-concept-wise-project/helm'
+        CHART_DIR     = "${MANIFEST_DIR}/chart"
+    }
+
+    options { timeout(time: 20, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Preflight — helm CLI') {
+            steps {
+                sh 'helm version --short'
+            }
+        }
+
+        stage('Lint chart') {
+            steps {
+                sh "helm lint ${CHART_DIR}"
+            }
+        }
+
+        stage('Build & push images') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BACKEND_IMG}:${IMAGE_TAG}"  -t "${BACKEND_IMG}:latest"  "${MANIFEST_DIR}/backend"
+                      docker build -t "${FRONTEND_IMG}:${IMAGE_TAG}" -t "${FRONTEND_IMG}:latest" "${MANIFEST_DIR}/frontend"
+                      docker push  "${BACKEND_IMG}:${IMAGE_TAG}";  docker push "${BACKEND_IMG}:latest"
+                      docker push  "${FRONTEND_IMG}:${IMAGE_TAG}"; docker push "${FRONTEND_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Preview: helm diff') {
+            // Requires the helm-diff plugin. Optional but very valuable in CI —
+            // logs the exact changes the upgrade will make.
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      helm diff upgrade demo ${CHART_DIR} \
+                        --set backend.image.tag=${IMAGE_TAG} \
+                        --set frontend.image.tag=${IMAGE_TAG} \
+                        --namespace ${NAMESPACE} \
+                        --allow-unreleased || true
+                    """
+                }
+            }
+        }
+
+        stage('Deploy — helm upgrade --install (dev)') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      helm upgrade --install demo ${CHART_DIR} \
+                        --set backend.image.tag=${IMAGE_TAG} \
+                        --set frontend.image.tag=${IMAGE_TAG} \
+                        --namespace ${NAMESPACE} \
+                        --create-namespace \
+                        --atomic \
+                        --timeout 5m \
+                        --wait
+                    """
+                }
+            }
+        }
+
+        stage('Deploy — prod release with values-prod.yaml') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      helm upgrade --install demo-prod ${CHART_DIR} \
+                        -f ${CHART_DIR}/values-prod.yaml \
+                        --set backend.image.tag=${IMAGE_TAG} \
+                        --set frontend.image.tag=${IMAGE_TAG} \
+                        --namespace ${NAMESPACE} \
+                        --atomic \
+                        --timeout 5m \
+                        --wait
+                    """
+                }
+            }
+        }
+
+        stage('Verify releases') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      helm list -n ${NAMESPACE}
+                      helm status demo      -n ${NAMESPACE}
+                      helm status demo-prod -n ${NAMESPACE}
+                      kubectl -n ${NAMESPACE} get pods -l app.kubernetes.io/instance=demo
+                      kubectl -n ${NAMESPACE} get pods -l app.kubernetes.io/instance=demo-prod
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                // helm --atomic already rolled back the failed release, but be explicit
+                // for the other release in case the failure was there.
+                sh "helm history demo      -n ${NAMESPACE} || true"
+                sh "helm history demo-prod -n ${NAMESPACE} || true"
+                sh "helm rollback demo      -n ${NAMESPACE} || true"
+                sh "helm rollback demo-prod -n ${NAMESPACE} || true"
+            }
+        }
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

@@ -1,0 +1,120 @@
+// Jenkins declarative pipeline for the jobs-rbac demo.
+//
+// Special considerations:
+//   - Multi-namespace: team-alpha / team-beta
+//   - Uses different image names (jobs-rbac-backend / jobs-rbac-ui, not the shared k8s-demo-*)
+//   - Deploys namespaces + SA/Role/RoleBinding + Deployment + kicks off Jobs
+//   - Jobs are one-shot — we run them, wait for completion, and check RBAC outcomes
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY     = 'ghcr.io/ronitj1211'
+        BACKEND_IMG  = "${REGISTRY}/jobs-rbac-backend"
+        UI_IMG       = "${REGISTRY}/jobs-rbac-ui"
+        IMAGE_TAG    = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE    = 'team-alpha'
+        MANIFEST_DIR = 'K8S-demo-concept-wise-project/jobs-rbac'
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER',
+                    passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BACKEND_IMG}:${IMAGE_TAG}" -t "${BACKEND_IMG}:latest" "${MANIFEST_DIR}/backend"
+                      docker build -t "${UI_IMG}:${IMAGE_TAG}"      -t "${UI_IMG}:latest"      "${MANIFEST_DIR}/frontend"
+                      docker push  "${BACKEND_IMG}:${IMAGE_TAG}"; docker push "${BACKEND_IMG}:latest"
+                      docker push  "${UI_IMG}:${IMAGE_TAG}";      docker push "${UI_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Namespaces + backend + frontend + RBAC') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl apply -f ${MANIFEST_DIR}/backend/01-namespaces.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/02-deployment.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/frontend/frontend.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/20-serviceaccount.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/21-role.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Roll new images') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} set image deployment/backend  backend=${BACKEND_IMG}:${IMAGE_TAG} --record
+                      kubectl -n ${NAMESPACE} set image deployment/frontend ui=${UI_IMG}:${IMAGE_TAG}          --record
+
+                      kubectl -n ${NAMESPACE} rollout status deployment/backend  --timeout=3m
+                      kubectl -n ${NAMESPACE} rollout status deployment/frontend --timeout=3m
+                    """
+                }
+            }
+        }
+
+        stage('Run hello-job') {
+            // Jobs are one-shot; delete any previous run of the same name before re-applying.
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} delete job hello-job --ignore-not-found
+                      kubectl -n ${NAMESPACE} apply  -f ${MANIFEST_DIR}/backend/10-job.yaml
+                      kubectl -n ${NAMESPACE} wait --for=condition=complete job/hello-job --timeout=90s
+
+                      kubectl -n ${NAMESPACE} get job hello-job
+                      kubectl -n ${NAMESPACE} logs -l job-name=hello-job --tail=10
+                    """
+                }
+            }
+        }
+
+        stage('Apply CronJob') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/11-cronjob.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Verify RBAC boundary') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    // The pod-reader SA should be able to list pods in team-alpha but not in team-beta.
+                    sh '''
+                      kubectl auth can-i list pods -n team-alpha --as=system:serviceaccount:team-alpha:pod-reader
+                      kubectl auth can-i list secrets -n team-alpha --as=system:serviceaccount:team-alpha:pod-reader && \
+                        (echo "❌ SA can list secrets — should be denied"; exit 1) || echo "✅ secrets correctly denied"
+                      kubectl auth can-i list pods -n team-beta  --as=system:serviceaccount:team-alpha:pod-reader && \
+                        (echo "❌ SA can list pods in team-beta — should be denied"; exit 1) || echo "✅ cross-ns correctly denied"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}

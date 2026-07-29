@@ -1,0 +1,127 @@
+// Jenkins declarative pipeline for the kubernetes-pods demo.
+//
+// Deploy pattern: naked Pods, so we delete + re-apply to pick up the new image.
+// This is NOT a production pattern — in real life you'd use a Deployment. But it
+// matches this folder's teaching demo.
+//
+// Prerequisites in Jenkins:
+//   - Credentials 'dockerhub-creds'   (username+password for the registry)
+//   - Credentials 'kubeconfig'        (secret file, kubeconfig for the target cluster)
+//   - Docker + kubectl available on the agent
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY       = 'ghcr.io/ronitj1211'
+        BACKEND_IMAGE  = "${REGISTRY}/k8s-demo-backend"
+        FRONTEND_IMAGE = "${REGISTRY}/k8s-demo-frontend"
+        IMAGE_TAG      = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        NAMESPACE      = 'default'
+        MANIFEST_DIR   = 'K8S-demo-concept-wise-project/kubernetes-pods'
+    }
+
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()    // don't race deploys
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build images') {
+            parallel {
+                stage('backend') {
+                    steps {
+                        sh """
+                          docker build -t ${BACKEND_IMAGE}:${IMAGE_TAG} \
+                                       -t ${BACKEND_IMAGE}:latest \
+                                       ${MANIFEST_DIR}/backend
+                        """
+                    }
+                }
+                stage('frontend') {
+                    steps {
+                        sh """
+                          docker build -t ${FRONTEND_IMAGE}:${IMAGE_TAG} \
+                                       -t ${FRONTEND_IMAGE}:latest \
+                                       ${MANIFEST_DIR}/frontend
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Push images') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER',
+                    passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker push "${BACKEND_IMAGE}:${IMAGE_TAG}"
+                      docker push "${BACKEND_IMAGE}:latest"
+                      docker push "${FRONTEND_IMAGE}:${IMAGE_TAG}"
+                      docker push "${FRONTEND_IMAGE}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy — replace naked Pods') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    // Naked Pods can't be rolled — delete then re-apply.
+                    // Use --ignore-not-found so the first deploy doesn't fail.
+                    sh """
+                      kubectl -n ${NAMESPACE} delete pod backend-pod frontend-pod --ignore-not-found
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/backend/backend-pod.yaml
+                      kubectl -n ${NAMESPACE} apply -f ${MANIFEST_DIR}/frontend/frontend-pod.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Wait for Pods Ready') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} wait --for=condition=ready pod/backend-pod  --timeout=90s
+                      kubectl -n ${NAMESPACE} wait --for=condition=ready pod/frontend-pod --timeout=90s
+                    """
+                }
+            }
+        }
+
+        stage('Smoke test') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      kubectl -n ${NAMESPACE} exec backend-pod -- wget -qO- http://localhost:3000/ | grep -q hostname
+                      echo '✅ smoke test passed'
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Deploy of naked Pods succeeded — image tag ${IMAGE_TAG}"
+        }
+        failure {
+            echo "Deploy failed — inspect stage logs above"
+            // slackSend channel: '#alerts', color: 'danger', message: "Pods deploy failed: ${env.BUILD_URL}"
+        }
+        always {
+            sh 'docker logout $REGISTRY || true'
+        }
+    }
+}

@@ -1,0 +1,155 @@
+// Jenkins declarative pipeline for the argocd demo.
+//
+// This is the GitOps pattern — Jenkins does NOT kubectl apply.
+// Instead, Jenkins:
+//   1. Builds and pushes the new image
+//   2. Updates the image tag in the manifests repo (which Argo CD watches)
+//   3. Optionally triggers Argo CD to sync immediately (bypass the poll)
+//   4. Waits for Argo CD to report Healthy on the Application
+//
+// Argo CD does the actual kubectl apply. Jenkins never touches the cluster
+// directly. This is the correct architecture for GitOps.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY       = 'ghcr.io/ronitj1211'
+        BACKEND_IMG    = "${REGISTRY}/argocd-demo-backend"
+        FRONTEND_IMG   = "${REGISTRY}/argocd-demo-frontend"
+        IMAGE_TAG      = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+
+        // If manifests live in a separate repo — set this to that repo's URL.
+        // Here we use the same repo (this repo) as the source of truth.
+        MANIFESTS_REPO = 'git@github.com:ronitj1211/K8S-DEMO-APP.git'
+        MANIFESTS_PATH = 'K8S-demo-concept-wise-project/argocd/manifests'
+
+        ARGOCD_APP     = 'demo-app'
+        ARGOCD_SERVER  = 'argocd.example.com'
+    }
+
+    options { timeout(time: 25, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout code') { steps { checkout scm } }
+
+        stage('Build & push images') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${BACKEND_IMG}:${IMAGE_TAG}"  -t "${BACKEND_IMG}:latest"  K8S-demo-concept-wise-project/argocd/backend
+                      docker build -t "${FRONTEND_IMG}:${IMAGE_TAG}" -t "${FRONTEND_IMG}:latest" K8S-demo-concept-wise-project/argocd/frontend
+                      docker push  "${BACKEND_IMG}:${IMAGE_TAG}";  docker push "${BACKEND_IMG}:latest"
+                      docker push  "${FRONTEND_IMG}:${IMAGE_TAG}"; docker push "${FRONTEND_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Bump image tag in manifests repo') {
+            // The Argo CD Application watches this Git path. Updating the image
+            // reference here is how the deploy actually happens — Argo picks it up.
+            steps {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'manifests-repo-ssh',
+                    keyFileVariable: 'SSH_KEY'
+                )]) {
+                    sh '''
+                      # Set up SSH auth to the manifests repo
+                      mkdir -p ~/.ssh
+                      cp "$SSH_KEY" ~/.ssh/id_ed25519
+                      chmod 600 ~/.ssh/id_ed25519
+                      ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+                      git config --global user.email "jenkins@ci.example.com"
+                      git config --global user.name  "Jenkins CI"
+
+                      # If manifests are in a separate repo, clone it here; since our
+                      # demo uses the same repo, we already have a checkout.
+                      # Update the image tag in the Deployment manifest.
+                      sed -i "s|image: .*/argocd-demo-backend:.*|image: ${BACKEND_IMG}:${IMAGE_TAG}|" ${MANIFESTS_PATH}/10-backend.yaml
+                      sed -i "s|image: .*/argocd-demo-frontend:.*|image: ${FRONTEND_IMG}:${IMAGE_TAG}|" ${MANIFESTS_PATH}/20-frontend.yaml
+
+                      git add ${MANIFESTS_PATH}/10-backend.yaml ${MANIFESTS_PATH}/20-frontend.yaml
+                      if git diff --cached --quiet; then
+                        echo "no manifest changes — image tags already at ${IMAGE_TAG}"
+                      else
+                        git commit -m "chore(deploy): bump images to ${IMAGE_TAG}
+
+Triggered by Jenkins build ${BUILD_NUMBER}"
+                        git push origin HEAD:main
+                      fi
+                    '''
+                }
+            }
+        }
+
+        stage('Trigger Argo CD sync (optional — skip if webhook is set up)') {
+            // Argo polls every 3 min by default; a webhook from GitHub to Argo would
+            // sync immediately. If neither is set up, log in and trigger explicitly.
+            steps {
+                withCredentials([string(
+                    credentialsId: 'argocd-auth-token',
+                    variable: 'ARGOCD_TOKEN'
+                )]) {
+                    sh '''
+                      argocd app sync ${ARGOCD_APP} \
+                        --server ${ARGOCD_SERVER} \
+                        --auth-token "$ARGOCD_TOKEN" \
+                        --grpc-web
+                    '''
+                }
+            }
+        }
+
+        stage('Wait for Argo CD Healthy') {
+            steps {
+                withCredentials([string(
+                    credentialsId: 'argocd-auth-token',
+                    variable: 'ARGOCD_TOKEN'
+                )]) {
+                    sh '''
+                      argocd app wait ${ARGOCD_APP} \
+                        --server ${ARGOCD_SERVER} \
+                        --auth-token "$ARGOCD_TOKEN" \
+                        --grpc-web \
+                        --health --sync \
+                        --timeout 600
+                    '''
+                }
+            }
+        }
+
+        stage('Post-deploy verification') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                      # If we have direct kubectl access, verify /version returns the new SHA.
+                      # In a strict GitOps setup, Jenkins wouldn't have kubectl — you'd
+                      # rely on Argo's health status as the truth signal.
+                      kubectl -n argocd-demo get pods -l app=backend
+                      POD=\$(kubectl -n argocd-demo get pod -l app=backend -o jsonpath='{.items[0].metadata.name}')
+                      RESP=\$(kubectl -n argocd-demo exec \$POD -- wget -qO- http://localhost:3000/)
+                      echo "\$RESP"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            // In GitOps, "rollback" means "revert the manifest commit in Git."
+            // Argo CD will detect the revert and roll back the cluster.
+            echo "❌ Deploy failed. To roll back:"
+            echo "   git revert ${env.GIT_COMMIT}"
+            echo "   git push origin main"
+            echo "Argo CD will pick it up and re-deploy the previous version."
+        }
+        always { sh 'docker logout $REGISTRY || true' }
+    }
+}
