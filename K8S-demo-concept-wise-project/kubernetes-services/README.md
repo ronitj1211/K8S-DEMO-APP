@@ -19,6 +19,166 @@ The Service uses a **label selector** to decide which Pods belong to it. As Pods
 
 ---
 
+## Service discovery in practice — a two-Service example
+
+The clearest way to see what service discovery *does* is to look at two services talking to each other.
+
+Say we have a mini e-commerce backend:
+
+- **`orders`** — receives HTTP requests to create an order, then calls `payments` to charge the customer.
+- **`payments`** — charges the card, replies with success/failure.
+
+Both live in the `default` namespace. Each has its own Deployment (with multiple replica Pods for availability) and its own Service (giving it a stable name + virtual IP).
+
+### The manifests
+
+**Orders — Deployment + Service:**
+
+```yaml
+# orders-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: orders } }
+  template:
+    metadata: { labels: { app: orders } }
+    spec:
+      containers:
+        - name: orders
+          image: my-org/orders:1.2.0
+          env:
+            # Note: no IP. Just the Service's DNS name.
+            - name: PAYMENTS_URL
+              value: http://payments/charge
+---
+# orders-service.yaml
+apiVersion: v1
+kind: Service
+metadata: { name: orders }
+spec:
+  type: ClusterIP
+  selector: { app: orders }             # match Pods with app=orders
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+**Payments — Deployment + Service:**
+
+```yaml
+# payments-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: payments } }
+  template:
+    metadata: { labels: { app: payments } }
+    spec:
+      containers:
+        - name: payments
+          image: my-org/payments:2.0.1
+---
+# payments-service.yaml
+apiVersion: v1
+kind: Service
+metadata: { name: payments }
+spec:
+  type: ClusterIP
+  selector: { app: payments }           # match Pods with app=payments
+  ports:
+    - port: 80
+      targetPort: 9000
+```
+
+### How the app code looks
+
+Inside an `orders` Pod, the application does:
+
+```js
+// From orders/server.js — pseudocode
+const PAYMENTS_URL = process.env.PAYMENTS_URL;   // "http://payments/charge"
+
+app.post('/orders', async (req, res) => {
+  const orderId = crypto.randomUUID();
+  const result = await fetch(PAYMENTS_URL, {     // ← the magic line
+    method: 'POST',
+    body: JSON.stringify({ orderId, amount: req.body.amount }),
+  });
+  res.json({ orderId, paymentStatus: result.status });
+});
+```
+
+Notice what's **not** there:
+
+- No IP address.
+- No hardcoded Pod names.
+- No lookup table.
+- No service-registry client library.
+
+Just `fetch('http://payments/charge')` — as if `payments` were a regular DNS name on the internet.
+
+### What actually happens at request time
+
+When an orders Pod's code calls `http://payments/charge`:
+
+1. **DNS lookup**: the OS asks CoreDNS to resolve `payments`. Because the Pod's `/etc/resolv.conf` has `search default.svc.cluster.local svc.cluster.local cluster.local`, CoreDNS tries `payments.default.svc.cluster.local` first. Match — returns the Service's ClusterIP (say `10.43.55.12`).
+2. **TCP connect**: the OS opens a connection to `10.43.55.12:80`.
+3. **kube-proxy iptables DNAT**: on the node's kernel, the packet destined for `10.43.55.12:80` is rewritten to a real payments Pod IP + port (e.g. `10.42.0.42:9000`), chosen by iptables' random selection across the 2 payments Pods.
+4. **Payments Pod handles the request**, replies.
+5. **Reverse-NAT** on the return path makes the response appear to come from `10.43.55.12:80` — orders' code sees a normal HTTP response from `payments`.
+
+The orders code never learned anything about payments' Pods. If payments' Pods restart, get replaced, scale to 10, or move to a different node — orders still just calls `http://payments/charge`. The Service is the stable rendezvous.
+
+### The critical property — resilience to change
+
+Now play out these three scenarios and think about what would break WITHOUT a Service:
+
+| Scenario | Without a Service (hardcoded IPs) | With the Service |
+|---|---|---|
+| A payments Pod dies and gets replaced | Orders code calls a dead IP → 100% failures until config is manually updated | Service's Endpoints list drops the dead IP within seconds; new Pod's IP is added; orders traffic keeps flowing to healthy backends |
+| Payments scales from 2 → 10 replicas | Orders code only knows the old 2 IPs; misses the 8 new Pods | Service's Endpoints list grows; all 10 Pods get their share of traffic |
+| Payments moves to a different node | Pod IP changes; orders code is stuck on the old IP | Service selector still matches by label; endpoints update; orders keeps working |
+
+That's what service discovery gives you: **decoupling code from location**.
+
+### Cross-namespace calls
+
+If `payments` lived in a different namespace (say `payments-team`), the orders code would use:
+
+```
+http://payments.payments-team.svc.cluster.local/charge
+
+# Or the short form — often enough:
+http://payments.payments-team/charge
+```
+
+The `<service>.<namespace>` shortcut is the pattern most apps use for cross-namespace calls. Same-namespace calls can just use `payments`.
+
+### Quick check: is your Service discoverable?
+
+```bash
+# 1. Confirm the Service exists and picked up backing Pods
+kubectl get svc payments
+kubectl get endpoints payments
+
+# 2. From an orders Pod, resolve the name
+kubectl exec deployment/orders -- nslookup payments
+
+# 3. Curl it
+kubectl exec deployment/orders -- wget -qO- http://payments/charge -X POST
+```
+
+If step 2 returns an IP but step 3 fails, the Service is discoverable but the routing/backend has a problem (Pods not Ready, wrong port).
+If step 2 fails, the Service doesn't exist or DNS is broken.
+
+---
+
 ## Types of Services
 
 | Type | Reachable from | Use for |
