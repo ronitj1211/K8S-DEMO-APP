@@ -307,7 +307,154 @@ curl http://localhost:30081/api/   # backend via Nginx proxy — the correct pat
 
 ---
 
-## 9. Key takeaways
+## 9. Configuring the backend Service name in the frontend
+
+### Where the backend name already lives — and why
+
+In `nginx.conf`:
+```nginx
+location /api/ {
+    proxy_pass http://backend-clusterip/;
+}
+```
+
+`backend-clusterip` here is a **Kubernetes Service name**, not an IP. Every
+Service automatically gets a DNS entry via CoreDNS:
+
+```
+<service-name>.<namespace>.svc.cluster.local
+```
+
+So `backend-clusterip` (short form) resolves to
+`backend-clusterip.default.svc.cluster.local`, which maps internally to
+whatever the current ClusterIP is. Even if that IP changes later (e.g. the
+Service gets recreated), the name keeps resolving correctly — which is why
+Services should always be referenced **by name**, never by IP.
+
+Verify DNS resolution from inside the cluster:
+```bash
+kubectl run tmp --rm -it --image=busybox -- nslookup backend-clusterip
+```
+
+### Can the backend name go in `index.html` instead of `nginx.conf`?
+
+**No** — and the reason is the same root cause covered earlier for ClusterIP.
+`index.html`'s `<script>` runs **in the browser**, on the user's machine —
+not inside the cluster. Kubernetes Service DNS names (like `backend-clusterip`)
+only exist in CoreDNS, **inside** the cluster network. The browser's DNS
+resolver has never heard of them and never will, no matter what's typed into
+the JS. Putting `http://backend-clusterip` into browser-side `fetch()` code
+would fail exactly like calling the ClusterIP directly did.
+
+What *does* correctly go in `index.html` is a **relative path only**:
+```html
+<input id="url" value="/api/" />
+```
+The browser just calls `/api/` on whatever host it's already on
+(`localhost:30081`) — it has no knowledge of, and no need to know, what
+actually serves that path behind the scenes.
+
+### Division of responsibility
+
+| Where | What it knows |
+|---|---|
+| `index.html` (runs in browser) | Only `/api/` — a relative path, zero backend awareness |
+| `nginx.conf` (runs server-side, in the frontend Pod) | The actual backend Service name (`backend-clusterip`), resolved via cluster DNS |
+
+This separation is itself a best practice: frontend browser code should never
+need backend infrastructure details (Service names, ports, IPs) — that's an
+implementation detail owned by the proxy/server layer. Move the backend to a
+different Service name tomorrow, and only `nginx.conf` changes — `index.html`
+stays untouched.
+
+### Making the backend name configurable (no rebuild needed)
+
+Instead of hardcoding `backend-clusterip` into the image, use an environment
+variable with `envsubst`, a pattern supported natively by the official
+`nginx:alpine` image.
+
+**`nginx.conf.template`** (uses a variable instead of a hardcoded name):
+```nginx
+server {
+    listen 80;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://${BACKEND_SERVICE}/;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+**Dockerfile:**
+```dockerfile
+FROM nginx:1.27-alpine
+COPY index.html /usr/share/nginx/html/index.html
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+EXPOSE 80
+```
+
+> `nginx:alpine` images (20.x+) automatically run `envsubst` on any file in
+> `/etc/nginx/templates/*.template` at container startup, writing the result
+> to `/etc/nginx/conf.d/` — no extra scripting required.
+
+**Deployment YAML** — set the env var:
+```yaml
+env:
+  - name: BACKEND_SERVICE
+    value: "backend-clusterip"
+```
+
+Now the same image works against any backend Service name just by changing
+the env var in the Deployment manifest — no image rebuild needed.
+
+### "But in real apps, we configure the backend name in the frontend" — reconciling this
+
+This is true, but it refers to a **different layer** than the browser JS.
+There are two things commonly both called "frontend":
+
+1. **Browser-side code** — plain JS running in the user's browser
+   (`index.html`'s `<script>` in this project). Has zero access to Kubernetes
+   DNS or anything cluster-internal. Should never know backend Service names.
+
+2. **Frontend *server*** — a process running as a Pod inside the cluster
+   (Node/Next.js server doing SSR or acting as a Backend-for-Frontend, or in
+   this project, **Nginx itself**). This layer *does* run inside the cluster,
+   so it legitimately knows and uses backend Service names — via env vars,
+   ConfigMaps, or config files.
+
+   Example of what this looks like with a real Node-based frontend server
+   (not part of this project, but illustrative):
+   ```js
+   // server.js — running INSIDE a Pod, NOT in the browser
+   const BACKEND_URL = process.env.BACKEND_SERVICE || "http://backend-clusterip";
+
+   app.get('/api/data', async (req, res) => {
+     const r = await fetch(BACKEND_URL); // server-to-server call, inside cluster
+     res.json(await r.json());
+   });
+   ```
+
+So "configure the backend name in the frontend" means the frontend's
+**server-side** config/code — not the static HTML/JS shipped to the browser.
+
+| Real-world equivalent | This project's equivalent |
+|---|---|
+| Frontend server config (env vars / `server.js`) | `nginx.conf` (or its env-var template version) |
+| Frontend browser code (never sees backend names) | `index.html` |
+
+This project already follows the real-world pattern correctly —
+`nginx.conf` **is** the frontend's server-side configuration layer, just in
+the form of a proxy config instead of application code, since this frontend
+has no Node/Express server of its own.
+
+---
+
+## 10. Key takeaways
 
 1. `kubectl get endpoints` having a valid pod IP means the Service selector is
    working — it does **not** mean the Service is reachable from outside.
