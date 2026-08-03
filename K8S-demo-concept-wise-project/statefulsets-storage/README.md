@@ -16,7 +16,7 @@ That works for a stateless web server. It does **not** work for:
 
 For those, Kubernetes gives you:
 
-- **PersistentVolume (PV) + PersistentVolumeClaim (PVC) + StorageClass** — the storage layer.
+- **PersistentVolume (PV) + PersistentVolumeClaim (PVC) + StorageClass** — the storage layer ([persistent-volumes](../persistent-volumes/) covers this in depth).
 - **StatefulSet** — the controller that gives each Pod a stable name, hostname, and its own PVC.
 
 ---
@@ -284,4 +284,4 @@ kubectl delete pvc -l app=counter
 5. **PVCs survive** Pod deletion and even StatefulSet deletion. To delete the data you must delete the PVCs explicitly.
 6. For production stateful apps (Postgres, Kafka, etc.) you almost always use an **operator** — don't hand-roll the StatefulSet.
 
-**Back to** [course index](../README.md)
+**Previous:** [persistent-volumes](../persistent-volumes/) · **Next:** [jobs-rbac](../jobs-rbac/)

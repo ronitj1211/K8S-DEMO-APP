@@ -24,22 +24,23 @@ The app is intentionally the same simple Node.js backend + HTML frontend everywh
 
 | # | Concept | Folder | What you'll learn |
 |---|---------|--------|-------------------|
-| 8 | **StatefulSets + Storage** | [statefulsets-storage](./statefulsets-storage/) | StatefulSets, PVC, PV, StorageClass, headless Services, per-Pod storage. |
-| 9 | **Jobs + RBAC** | [jobs-rbac](./jobs-rbac/) | Jobs, CronJobs, Namespaces, ServiceAccounts, Roles, RoleBindings, `auth can-i`. |
-| 10 | **Autoscaling + Resources** | [autoscaling-resources](./autoscaling-resources/) | HPA v2, CPU/memory requests + limits, QoS classes, metrics-server. |
+| 8 | **PersistentVolumes (PV/PVC)** | [persistent-volumes](./persistent-volumes/) | PV, PVC, StorageClass, dynamic vs static provisioning, access modes, reclaim policy, data persistence across Pod restarts. |
+| 9 | **StatefulSets + Storage** | [statefulsets-storage](./statefulsets-storage/) | StatefulSets, per-Pod PVCs via `volumeClaimTemplates`, headless Services, ordered rollout. |
+| 10 | **Jobs + RBAC** | [jobs-rbac](./jobs-rbac/) | Jobs, CronJobs, Namespaces, ServiceAccounts, Roles, RoleBindings, `auth can-i`. |
+| 11 | **Autoscaling + Resources** | [autoscaling-resources](./autoscaling-resources/) | HPA v2, CPU/memory requests + limits, QoS classes, metrics-server. |
 
 ### Part C — Observability & network security
 
 | # | Concept | Folder | What you'll learn |
 |---|---------|--------|-------------------|
-| 11 | **Logging (EFK)** | [elk-logging](./elk-logging/) | Elasticsearch + Fluent Bit (DaemonSet) + Kibana. Centralized log collection from every Pod. |
-| 12 | **Monitoring + NetworkPolicies** | [monitoring-networkpolicies](./monitoring-networkpolicies/) | Prometheus + Grafana scraping `/metrics`; default-deny + allow-list NetworkPolicies. |
+| 12 | **Logging (EFK)** | [elk-logging](./elk-logging/) | Elasticsearch + Fluent Bit (DaemonSet) + Kibana. Centralized log collection from every Pod. |
+| 13 | **Monitoring + NetworkPolicies** | [monitoring-networkpolicies](./monitoring-networkpolicies/) | Prometheus + Grafana scraping `/metrics`; default-deny + allow-list NetworkPolicies. |
 
 ### Part D — GitOps & delivery
 
 | # | Concept | Folder | What you'll learn |
 |---|---------|--------|-------------------|
-| 13 | **GitOps with Argo CD** | [argocd](./argocd/) | Declarative CD from Git. Application CRD, auto-sync, self-heal, prune, App of Apps pattern. |
+| 14 | **GitOps with Argo CD** | [argocd](./argocd/) | Declarative CD from Git. Application CRD, auto-sync, self-heal, prune, App of Apps pattern. |
 
 The order is cumulative — each concept builds on the previous ones. You can jump to a specific folder if you already know the earlier material.
 

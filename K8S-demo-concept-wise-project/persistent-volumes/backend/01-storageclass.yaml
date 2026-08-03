@@ -1,0 +1,16 @@
+# StorageClass: the recipe for dynamic provisioning.
+# Most clusters already have a default StorageClass — check with:
+#   kubectl get storageclass
+#
+# This example is for minikube. On k3s/Colima, skip this file and use the
+# built-in `local-path` class instead.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: demo-standard
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: k8s.io/minikube-hostpath
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

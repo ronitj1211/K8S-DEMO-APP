@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PV + PVC Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #326ce5; }
+    pre { background: #f3f3f3; padding: 12px; border-radius: 6px; white-space: pre-wrap; }
+    input, textarea { padding: 6px; width: 100%; box-sizing: border-box; }
+    button { padding: 8px 16px; cursor: pointer; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <h1>PersistentVolume + PVC Demo</h1>
+  <p>
+    One Deployment Pod mounts a <strong>PVC</strong>. Counter and notes live on disk.
+    Delete the Pod — the new Pod re-attaches the same PVC and your data survives.
+  </p>
+  <label>Backend URL:</label>
+  <input id="url" value="http://localhost:30095" />
+  <br /><br />
+  <button onclick="read()">GET /</button>
+  <button onclick="inc()">Increment counter</button>
+  <br /><br />
+  <label>Add a note:</label>
+  <textarea id="note" rows="2" placeholder="This note survives Pod restarts…"></textarea>
+  <br /><br />
+  <button onclick="addNote()">POST /notes</button>
+  <pre id="out">Click a button.</pre>
+
+  <script>
+    async function read() {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      out.textContent = JSON.stringify(await (await fetch(url)).json(), null, 2);
+    }
+    async function inc() {
+      const url = document.getElementById('url').value;
+      const out = document.getElementById('out');
+      const r = await fetch(url + '/inc', { method: 'POST' });
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+    }
+    async function addNote() {
+      const url = document.getElementById('url').value;
+      const text = document.getElementById('note').value;
+      const out = document.getElementById('out');
+      const r = await fetch(url + '/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+      document.getElementById('note').value = '';
+    }
+  </script>
+</body>
+</html>

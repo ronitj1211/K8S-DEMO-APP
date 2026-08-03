@@ -273,4 +273,4 @@ helm list -A                          # all releases in all namespaces
 4. Use `helm template` / `--dry-run` to **preview** what Helm will create before installing.
 5. Don't hand-write everything — community charts cover most off-the-shelf software (databases, ingress controllers, monitoring).
 
-**Previous:** [daemonsets](../daemonsets/) · Back to [course index](../README.md)
+**Previous:** [daemonsets](../daemonsets/) · **Next:** [persistent-volumes](../persistent-volumes/)

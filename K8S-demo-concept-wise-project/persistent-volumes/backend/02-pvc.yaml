@@ -1,0 +1,15 @@
+# PersistentVolumeClaim: "I need 2 GiB of ReadWriteOnce storage."
+# The cluster's StorageClass (default or explicit) provisions a PV and binds it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notes-data
+  labels:
+    app: notes
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName: demo-standard   # uncomment on minikube if you applied 01-storageclass.yaml

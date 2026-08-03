@@ -1,0 +1,34 @@
+# Static provisioning example — NOT used by the main demo above.
+# An admin pre-creates the PV; the PVC binds to it by size + accessMode + StorageClass.
+#
+# Apply this only if you want to practice manual PV/PVC binding:
+#   kubectl apply -f backend/04-static-pv-pvc-example.yaml
+#   kubectl get pv,pvc
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: static-demo-pv
+  labels:
+    type: local
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /tmp/k8s-static-pv-demo
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: static-demo-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 1Gi

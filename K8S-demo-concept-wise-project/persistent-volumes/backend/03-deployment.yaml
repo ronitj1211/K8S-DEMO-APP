@@ -1,0 +1,53 @@
+# Deployment + PVC: one Pod mounts persistent storage.
+# replicas: 1 because ReadWriteOnce volumes attach to a single node at a time.
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes
+spec:
+  type: NodePort
+  selector:
+    app: notes
+  ports:
+    - port: 80
+      targetPort: 3000
+      nodePort: 30095
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes
+  labels:
+    app: notes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notes
+  template:
+    metadata:
+      labels:
+        app: notes
+    spec:
+      containers:
+        - name: app
+          image: pv-demo-backend:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: notes-data
