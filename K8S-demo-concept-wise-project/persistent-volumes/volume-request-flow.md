@@ -1,0 +1,264 @@
+# Volume Request Flow — Field Linkage (Pod → PVC → StorageClass → PV)
+
+How Kubernetes objects actually reference each other for storage — every
+field that has to match another field, and every field that doesn't.
+
+---
+
+## 1. The three name-matching links
+
+There are three separate places where a name in one YAML has to equal a
+name in another (or in the same file). Only two of them cross between
+objects — the third never leaves the Pod.
+
+### Link 1 — inside the Pod: `volumeMounts[].name` ↔ `volumes[].name`
+
+Never leaves the Pod's own spec. This is how a container knows *which*
+declared volume to mount, and where.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+spec:
+  containers:
+    - name: app
+      volumeMounts:
+        - name: data                    # (A) must match (B) below
+          mountPath: /data
+  volumes:
+    - name: data                        # (B) arbitrary local label
+      persistentVolumeClaim:
+        claimName: my-pvc               # (C) — Link 2, see below
+```
+
+- `volumeMounts[].name` is a **local pointer** — "mount whatever is declared
+  under this name in `spec.volumes`."
+- `volumes[].name` is that declaration — not a Kubernetes object name, just
+  a string scoped to this one Pod spec. Nothing outside this Pod ever sees
+  it.
+- Mismatch here (including case) silently leaves the container with nothing
+  mounted at that path.
+
+### Link 2 — Pod → PVC: `claimName` = PVC's `metadata.name`
+
+```yaml
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: my-pvc               # must equal ↓
+```
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc                          # this exact string
+```
+
+A real cross-object reference. `claimName` must exactly match a PVC's
+`metadata.name` **in the same namespace** as the Pod — PVCs are namespaced,
+so a Pod in `namespace-a` can never reference a PVC in `namespace-b`, even
+with an identical name.
+
+If no matching PVC exists:
+```
+Warning  FailedMount  ... persistentvolumeclaim "my-pvc" not found
+```
+
+### Link 3 — PVC → StorageClass or PV
+
+This is where the real "matching search" happens — and it splits into two
+very different mechanisms.
+
+**3a. Dynamic path — PVC's `storageClassName` = StorageClass's `metadata.name`**
+```yaml
+spec:
+  storageClassName: gp3                 # must equal ↓
+```
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3                             # this exact string
+```
+This is a genuine name match — and the trigger that hands control to that
+StorageClass's `provisioner` to create a brand-new PV.
+
+**3b. Static path (or after dynamic provisioning creates a PV) — PVC ↔ PV, matched by criteria, not name**
+
+No name field is compared at all here. The PV controller scans every
+`Available` PV and checks:
+
+| PVC field | Must satisfy | PV field |
+|---|---|---|
+| `spec.resources.requests.storage` | PV capacity ≥ PVC request | `spec.capacity.storage` |
+| `spec.accessModes` | PV must support the requested mode(s) | `spec.accessModes` |
+| `spec.storageClassName` | Must be identical (including `""`) | `spec.storageClassName` |
+| `spec.volumeMode` (if set) | Must match exactly (`Filesystem`/`Block`) | `spec.volumeMode` |
+| `spec.selector` (optional, advanced) | PV's labels must match this selector, if set | `metadata.labels` |
+
+None of these compare `metadata.name` — a PVC named `my-pvc` can bind to a
+PV named `pvc-73f2e51c-20c7-...` because binding is **criteria-based**, not
+name-based, unlike Links 1 and 2.
+
+### The reverse link — written automatically after binding
+
+Once binding succeeds, the controller writes a field onto the PV that
+didn't exist before:
+
+```yaml
+# PV, AFTER binding — auto-added by the controller, never written by you
+spec:
+  claimRef:
+    namespace: default
+    name: my-pvc
+```
+
+`claimRef` locks that PV to exactly this one PVC (namespace + name),
+preventing any other PVC from claiming it while bound.
+
+---
+
+## 2. Full worked example — every link, annotated together
+
+```yaml
+# ---------- storageclass.yaml ----------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3                              # [A]
+provisioner: ebs.csi.aws.com
+
+---
+# ---------- pvc.yaml ----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc                           # [B]
+  namespace: default
+spec:
+  storageClassName: gp3                  # must equal [A] — triggers dynamic provisioning
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# ---------- pod.yaml ----------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+spec:
+  containers:
+    - name: app
+      volumeMounts:
+        - name: data                     # [C]
+          mountPath: /data
+  volumes:
+    - name: data                         # must equal [C]
+      persistentVolumeClaim:
+        claimName: my-pvc                # must equal [B]
+```
+
+```yaml
+# ---------- auto-generated by the provisioner, never written by you ----------
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-8f21a3c0-...                 # name is irrelevant, never referenced anywhere
+spec:
+  storageClassName: gp3                  # matches [A] — how it got associated
+  capacity:
+    storage: 10Gi                        # satisfies PVC's request
+  accessModes: ["ReadWriteOnce"]         # satisfies PVC's accessModes
+  claimRef:
+    namespace: default
+    name: my-pvc                         # points back to [B] — written after binding
+```
+
+---
+
+## 3. Summary of the three links, by matching mechanism
+
+| Link | Type of match | Fields involved |
+|---|---|---|
+| 1. Pod internal | Exact string, local scope only | `volumeMounts[].name` ↔ `volumes[].name` |
+| 2. Pod → PVC | Exact string, cross-object, namespace-scoped | `volumes[].persistentVolumeClaim.claimName` = PVC `metadata.name` |
+| 3a. PVC → StorageClass | Exact string, cross-object, cluster-scoped | PVC `spec.storageClassName` = StorageClass `metadata.name` |
+| 3b. PVC → PV | Criteria match (no name involved) | capacity, accessModes, storageClassName, volumeMode all satisfied |
+| Reverse: PV → PVC | Auto-written after bind, not authored | PV's `spec.claimRef.name` / `.namespace` |
+
+**One sentence summary:** names link the Pod to its PVC and the PVC to its
+StorageClass explicitly — but the PVC-to-PV bind itself is never a name
+match, it's Kubernetes searching for the first `Available` PV whose
+capacity, access mode, and storage class satisfy the PVC's request, then
+locking that PV to the PVC via an auto-written `claimRef` afterward.
+
+---
+
+## 4. The exact StorageClass fields that matter for matching
+
+Most `StorageClass` fields have nothing to do with "matching" at all —
+matching against a StorageClass is really just **one string comparison**.
+Everything else configures what happens *after* that match succeeds.
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+mountOptions:
+  - noatime
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: topology.ebs.csi.aws.com/zone
+        values:
+          - us-east-1a
+          - us-east-1b
+```
+
+### Fields that participate in actual matching
+
+| Field | Role in matching |
+|---|---|
+| `metadata.name` | The **only** field literally compared against something in the PVC — must exactly equal the PVC's `spec.storageClassName`. This is the entire "match" step. |
+| `metadata.annotations["storageclass.kubernetes.io/is-default-class"]` | Not a direct match — decides which StorageClass gets silently substituted in when a PVC omits `storageClassName` entirely. An implicit match, triggered by absence rather than an explicit name. |
+| `allowedTopologies` | Constrains which zones/nodes the provisioner is even allowed to create a PV in. Combined with `volumeBindingMode: WaitForFirstConsumer`, the "match" becomes not just "does the name equal the PVC's name" but also "can a volume actually be provisioned in a zone that satisfies the Pod's eventual placement." |
+
+### Fields that configure behavior, but are never matched against anything
+
+| Field | What it actually does |
+|---|---|
+| `provisioner` | Names which CSI driver plugin handles the creation call — the PVC never references this directly, it only cares that the StorageClass name resolves and some provisioner exists and is running. |
+| `parameters` | Opaque, driver-specific key-value config (disk type, IOPS, encryption) — passed straight through to the CSI driver's API call. The PVC has no visibility or say over these. |
+| `reclaimPolicy` | Gets copied onto the generated PV at creation time — inheritance, not matching. Once bound, this field lives entirely on the PV. |
+| `volumeBindingMode` | Controls timing (`Immediate` vs `WaitForFirstConsumer`), not eligibility — doesn't filter which StorageClass gets picked, only when the provisioning call fires. |
+| `allowVolumeExpansion` | A boolean gate checked later, at `kubectl patch pvc ... resources.requests.storage` time — irrelevant to the initial bind/match. |
+| `mountOptions` | Passed straight to the mount syscall on the node (e.g. `noatime`) — no relationship to matching at all. |
+
+### The one thing worth internalizing
+
+**"Matching a StorageClass" is really just: does the PVC's `storageClassName`
+string equal this StorageClass's `metadata.name` string — or is this
+StorageClass the cluster's marked default, and did the PVC leave the field
+blank?** That's it. Everything past that point — `provisioner`,
+`parameters`, `reclaimPolicy`, `volumeBindingMode` — isn't part of a
+matching decision; it's just the recipe Kubernetes follows once that one
+string comparison has already succeeded.
+
+Contrast this with **PV ↔ PVC matching** (section 1, Link 3b), which
+genuinely evaluates multiple real criteria — capacity, access modes, volume
+mode, storage class, and optionally a label selector. StorageClass matching
+is comparatively trivial: one name, or a default flag standing in for a
+name.
