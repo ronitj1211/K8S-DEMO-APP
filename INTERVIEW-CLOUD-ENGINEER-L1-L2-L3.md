@@ -74,7 +74,7 @@ Format used for every question: **What it is → How it works → How to answer 
 - Data lands in a local TSDB; long-term storage goes to Thanos/Mimir/AMP.
 - **Grafana** queries Prometheus with **PromQL** to render dashboards.
 - **Alertmanager** receives fired alert rules from Prometheus, then dedupes, groups, silences, and routes them to Slack/PagerDuty/email.
-- **Loki + Promtail** do the same for logs: Promtail runs as a DaemonSet, tails `/var/log/pods/*`, attaches Kubernetes labels, and pushes to Loki. Loki indexes only labels, not full text — which is why it's cheap.
+- **ELK/EFK** covers the logs pillar: a **Fluent Bit** (or Fluentd/Filebeat) DaemonSet tails `/var/log/containers/*.log` on every node, enriches each line with Kubernetes metadata, and ships it to **Elasticsearch**, which indexes the *full text* of every field. **Kibana** is the query and dashboard UI. Optionally **Logstash** sits in the middle for heavy parsing/enrichment. See the detailed logging subsection below.
 
 **Answer:**
 
@@ -129,7 +129,129 @@ Format used for every question: **What it is → How it works → How to answer 
     runbook_url: "https://wiki/runbooks/high-error-rate"
 ```
 
-**Interview tips:** Mention *why* you alert on symptoms (user-facing errors/latency) rather than causes (CPU) — that's SRE maturity. Mention error budgets if they push further.
+---
+
+### The logging half — ELK / EFK in detail
+
+**What it is:** The **ELK stack** is **E**lasticsearch + **L**ogstash + **K**ibana. On Kubernetes the standard variant is **EFK**, where **Fluent Bit** (or Fluentd) replaces Logstash as the node-level collector — Logstash is a JVM process using ~500 MB+ of RAM, which is far too heavy to run as a DaemonSet on every node, while Fluent Bit is written in C and uses ~10–30 MB. If you genuinely need heavy transformation, you keep Logstash but move it *between* Fluent Bit and Elasticsearch as a central pipeline rather than on every node.
+
+**The components:**
+
+| Component | Role | Runs as |
+|---|---|---|
+| **Fluent Bit / Fluentd** | Collect, parse, enrich, buffer, forward | DaemonSet (one pod per node) |
+| **Logstash** *(optional)* | Heavy transformation, grok parsing, multi-destination routing | Deployment (central) |
+| **Elasticsearch** | Distributed index + storage; full-text search | StatefulSet (master/data/ingest roles) |
+| **Kibana** | Query UI, dashboards, alerting | Deployment |
+| **Filebeat** *(alternative)* | Lightweight Elastic-native shipper | DaemonSet |
+| **Metricbeat / APM Server** | Metrics and traces into the same stack | DaemonSet / Deployment |
+| **Curator / ILM** | Retention, rollover, deletion of old indices | CronJob / built-in |
+
+**How the pipeline works, step by step:**
+
+> 1. **The container writes to `stdout`/`stderr`.** That is the contract — applications must never write to log files inside the container, because those disappear with the pod and can fill the node's disk.
+> 2. **The container runtime (containerd) writes those streams to the node** at `/var/log/pods/<namespace>_<pod>_<uid>/<container>/0.log`, with symlinks under `/var/log/containers/<pod>_<namespace>_<container>-<id>.log`. The filename itself encodes the pod, namespace, and container — which is how the collector derives metadata.
+> 3. **Fluent Bit runs as a DaemonSet**, with `/var/log` and the containerd log directory mounted read-only via `hostPath`, plus a ServiceAccount with RBAC to `get`/`list`/`watch` pods.
+> 4. **INPUT** — the `tail` plugin follows those files, using the `cri` or `docker` parser to strip the runtime wrapper (`timestamp stream flags message`) and tracking byte offsets in a **database file** so a restart doesn't duplicate or lose lines.
+> 5. **FILTER** — the `kubernetes` filter calls the API server to enrich each record with `namespace_name`, `pod_name`, `container_name`, `labels`, `annotations`, `host`, and `docker_id`. A second `parser` filter parses the application's own JSON payload into real fields. `nest`, `modify`, and `lua` filters reshape or redact (PII scrubbing happens here, before anything is stored).
+> 6. **BUFFER** — records go into memory or, better, a **filesystem buffer** so a burst or an Elasticsearch outage doesn't drop logs. Retry with backoff is configured here.
+> 7. **OUTPUT** — the `es` plugin bulk-indexes into Elasticsearch, typically into a **data stream** or a date-suffixed index like `logs-prod-2026.08.17`, using an **index template** that defines the field mappings.
+> 8. **Elasticsearch** indexes every field — an inverted index for text, doc values for aggregations. Data is split into **shards** distributed across data nodes, each shard with one or more **replicas** for HA.
+> 9. **ILM (Index Lifecycle Management)** moves indices through **hot → warm → cold → delete** phases: hot on fast SSD nodes for recent, actively-written data; warm for read-only, force-merged, shrunk indices; cold or a **searchable snapshot** in S3; deleted at the retention limit (e.g. 30 days hot, 90 days total).
+> 10. **Kibana** queries Elasticsearch via **KQL/Lucene** or the **DSL**, renders dashboards, and can run its own alerting rules.
+
+**Fluent Bit config worth quoting:**
+
+```ini
+[SERVICE]
+    Flush         5
+    Log_Level     info
+    Parsers_File  parsers.conf
+
+[INPUT]
+    Name              tail
+    Tag               kube.*
+    Path              /var/log/containers/*.log
+    Parser            cri
+    DB                /var/log/flb_kube.db      # offset tracking survives restarts
+    Mem_Buf_Limit     50MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[FILTER]
+    Name                kubernetes
+    Match               kube.*
+    Kube_URL            https://kubernetes.default.svc:443
+    Merge_Log           On                       # parse JSON app logs into fields
+    Merge_Log_Key       log_processed
+    Keep_Log            Off                      # drop the raw duplicate
+    K8S-Logging.Parser  On
+    K8S-Logging.Exclude On                       # honour per-pod exclude annotations
+    Labels              On
+    Annotations         Off
+
+[FILTER]
+    Name    modify
+    Match   kube.*
+    Remove  password                             # redact before it is ever stored
+    Remove  authorization
+
+[OUTPUT]
+    Name            es
+    Match           kube.*
+    Host            elasticsearch.logging.svc.cluster.local
+    Port            9200
+    HTTP_User       ${ES_USER}
+    HTTP_Passwd     ${ES_PASSWORD}
+    tls             On
+    Logstash_Format On
+    Logstash_Prefix logs-prod
+    Time_Key        @timestamp
+    Retry_Limit     5
+    Suppress_Type_Name On
+    storage.total_limit_size 5G                  # filesystem buffer cap
+```
+
+**Answer — how we ran it:**
+
+> Logs went to an **EFK stack**: Fluent Bit as a DaemonSet on every node, Elasticsearch as a StatefulSet with dedicated master and data nodes on gp3-backed PVCs, and Kibana behind the ALB Ingress with OIDC auth. Prometheus and Grafana handled metrics; Kibana handled logs.
+>
+> **Kibana dashboards we maintained:**
+> 1. **Error explorer** — a filtered view of `level: ERROR` across all namespaces, broken down by service, with a time histogram so you can see exactly when a spike started.
+> 2. **Per-service log dashboard** — request volume from access logs, status-code distribution, slowest endpoints, and the top exception messages as a terms aggregation on the stack-trace field.
+> 3. **Deployment correlation** — log volume and error rate annotated against deploy times, so "did the release cause this" is answered visually.
+> 4. **Ingress/ALB access-log dashboard** — ALB logs shipped from S3 into Elasticsearch, giving client IP, path, status, and target latency in the same UI as application logs.
+> 5. **Audit dashboard** — Kubernetes API audit logs: who deleted what, failed RBAC attempts, exec-into-pod events.
+> 6. **Infrastructure dashboard** — Metricbeat-collected node and pod metrics for teams who preferred one tool.
+>
+> **What we indexed and why:** structured JSON from the application with a mandatory set of fields — `timestamp`, `level`, `service`, `trace_id`, `span_id`, `user_id`, `http.method`, `http.path`, `http.status`, `duration_ms`, `message`. Forcing structured logging at the library level is what makes the whole stack useful; unstructured text means grok parsing in Logstash and constant breakage.
+>
+> **Alerting from logs:** Kibana alerting rules (or ElastAlert) on things metrics cannot see — e.g. "more than 50 `ERROR` entries matching `payment gateway timeout` in 5 minutes," a specific exception class appearing at all, a spike in failed-login events, or an audit-log rule for `delete` on a production namespace. These route into the same Alertmanager/PagerDuty pipeline so on-call has one inbox.
+>
+> **The correlation workflow:** an alert fires for high 5xx on checkout. In Grafana I see the RED dashboard spike and the exact time window. I pivot to Kibana with `kubernetes.namespace_name: "prod" and kubernetes.labels.app: "checkout" and level: "ERROR"` for that window, find the stack trace, take the `trace_id` from the log line, and search that ID across all services to see the full request path and which downstream call actually failed. Because Fluent Bit stamps the same `namespace`/`pod`/`app` fields that Prometheus uses as labels, the pivot between the two tools is mechanical.
+>
+> **Operational lessons worth volunteering:**
+> - **Elasticsearch is the expensive part.** Full-text indexing every field is what gives you powerful search and what drives cost. We controlled it with ILM (30 days hot, then searchable snapshots in S3), disabling indexing on fields we only ever display, and dropping health-check and debug lines in a Fluent Bit filter before they were shipped.
+> - **Shard sizing matters** — aim for 10–50 GB per shard. Thousands of tiny shards is the classic way to melt an Elasticsearch cluster's heap.
+> - **Set JVM heap to ~50% of the container memory limit, and never above ~31 GB** (compressed ordinary object pointers stop working past that).
+> - **Filesystem buffering in Fluent Bit is not optional** — without it, an Elasticsearch restart loses exactly the logs you need to explain the incident.
+> - **Monitor the logging pipeline itself** — Fluent Bit's `output_retries_failed_total` and dropped-record metrics scraped by Prometheus, plus Elasticsearch cluster health (green/yellow/red), heap pressure, and rejected bulk queue count.
+> - **Security** — TLS to Elasticsearch, authentication enabled (never an open cluster), Kibana behind SSO, and PII scrubbing in the filter stage rather than after the fact.
+
+**ELK vs Loki — be ready for this comparison:**
+
+| | ELK / EFK | Loki + Promtail |
+|---|---|---|
+| Indexing | **Full text** — every field searchable | **Labels only**; log body is compressed, not indexed |
+| Query power | Very high — aggregations, ML jobs, complex analytics | LogQL: label selectors + grep-style filters |
+| Storage cost | High (index is often larger than the raw logs) | Low (chunks in S3) |
+| Operational burden | Significant — JVM tuning, shard management, cluster health | Light |
+| UI | Kibana (purpose-built for logs) | Grafana (same pane as metrics) |
+| Best when | You need real log analytics, compliance/audit search, long retention with rich queries | You mostly filter by service and time, and want cheap retention |
+
+> If asked which I'd choose: **ELK when logs are a first-class analytical dataset** — audit/compliance requirements, security investigation, business analytics from logs, or teams that live in Kibana. **Loki when logs are primarily a debugging aid** attached to metrics, and cost matters more than query richness. Managed options remove most of the operational argument: **Elastic Cloud** or **AWS OpenSearch Service** for ELK, **Grafana Cloud** for Loki.
+
+**Interview tips:** Mention *why* you alert on symptoms (user-facing errors/latency) rather than causes (CPU) — that's SRE maturity. Mention error budgets if they push further. For the logging half, the detail that signals real experience is **ILM/retention and shard sizing** — anyone can name Elasticsearch, but only someone who has operated it talks about heap, shards, and buffering.
 
 ---
 
@@ -1127,7 +1249,9 @@ spec:
 
 ## Q4. How is observability implemented in EKS with Prometheus, Grafana, and Loki? How are logs collected and shipped with Promtail?
 
-**What it is:** The three pillars — **metrics** (Prometheus/Grafana), **logs** (Loki/Promtail), **traces** (Tempo/Jaeger/X-Ray) — correlated so you can move from "the graph spiked" to "here is the log line and the trace that caused it."
+**What it is:** The three pillars — **metrics** (Prometheus/Grafana), **logs** (Loki/Promtail *or* ELK/EFK), **traces** (Tempo/Jaeger/X-Ray) — correlated so you can move from "the graph spiked" to "here is the log line and the trace that caused it."
+
+> **Consistency note:** the interviewer named Loki in the question, so answer it on those terms. But if you described **ELK/EFK** in L1 (see L1 Q3), say so explicitly — *"we actually ran EFK; here's how the same pipeline maps onto Loki, and why you'd pick one over the other."* Interviewers compare notes between rounds, and a stack that changes story between L1 and L3 is a red flag. Owning the difference and explaining the trade-off scores better than either answer alone.
 
 **How it works — metrics:** covered in L1 Q3. Prometheus Operator + ServiceMonitors, node-exporter, kube-state-metrics, Alertmanager routing.
 
