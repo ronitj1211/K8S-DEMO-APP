@@ -1,0 +1,182 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+data:
+  # =====================================================================
+  # RECORDING RULES — precompute expensive queries on a schedule and store
+  # the result as a new time series. Dashboards then query the cheap
+  # precomputed series instead of recalculating over raw data every refresh.
+  # Naming convention: level:metric:operation
+  # =====================================================================
+  recording.yml: |
+    groups:
+      - name: demo-api.recording
+        interval: 15s
+        rules:
+          - record: service:http_requests:rate5m
+            expr: sum by (service) (rate(http_requests_total[5m]))
+
+          - record: service:http_errors:rate5m
+            expr: sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+
+          - record: service:http_error_ratio:rate5m
+            expr: |
+              sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+                /
+              clamp_min(sum by (service) (rate(http_requests_total[5m])), 0.001)
+
+          # histogram_quantile over a _bucket series is how you get p95/p99.
+          # Note `le` must be preserved in the by() clause — forget it and
+          # the query silently returns nothing.
+          - record: service:http_latency_p95:5m
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+              )
+
+          - record: service:http_latency_p99:5m
+            expr: |
+              histogram_quantile(
+                0.99,
+                sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+              )
+
+  # =====================================================================
+  # ALERTING RULES
+  #
+  # Every rule has:
+  #   for:         how long the condition must hold (kills flapping)
+  #   severity:    label Alertmanager routes on
+  #   summary +    annotations the human on-call actually reads
+  #   runbook_url
+  #
+  # Alert on SYMPTOMS users feel (errors, latency), not CAUSES (CPU).
+  # =====================================================================
+  alerts.yml: |
+    groups:
+      # ---------------- Application / symptom alerts ------------------
+      - name: application.alerts
+        rules:
+          - alert: HighErrorRate
+            expr: service:http_error_ratio:rate5m > 0.05
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "{{ $labels.service }} 5xx ratio is {{ $value | humanizePercentage }}"
+              description: "Error ratio above 5% for 2 minutes."
+              runbook_url: "https://wiki/runbooks/high-error-rate"
+
+          - alert: HighLatencyP95
+            expr: service:http_latency_p95:5m > 1
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.service }} p95 latency is {{ $value }}s"
+              description: "95th percentile latency above 1s for 2 minutes."
+              runbook_url: "https://wiki/runbooks/high-latency"
+
+          - alert: NoTrafficReceived
+            expr: service:http_requests:rate5m < 0.01
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.service }} is receiving no traffic"
+              description: "Either traffic genuinely stopped or the scrape is broken."
+
+      # ---------------- Target / pipeline health ----------------------
+      # If your monitoring breaks silently you have no monitoring at all.
+      - name: monitoring.alerts
+        rules:
+          - alert: TargetDown
+            expr: up == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Target {{ $labels.job }} / {{ $labels.instance }} is down"
+              description: "Prometheus cannot scrape this target."
+
+      # ---------------- Kubernetes object state -----------------------
+      # These all come from kube-state-metrics.
+      - name: kubernetes.alerts
+        rules:
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total[10m]) * 600 > 2
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is restarting repeatedly"
+              description: "More than 2 restarts in 10 minutes — check `kubectl logs --previous`."
+
+          - alert: PodNotReady
+            expr: |
+              sum by (namespace, pod) (
+                kube_pod_status_phase{phase=~"Pending|Unknown"}
+              ) > 0
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} not ready for 10m"
+              description: "Check `kubectl describe pod` events for the scheduling reason."
+
+          - alert: DeploymentReplicasMismatch
+            expr: |
+              kube_deployment_spec_replicas
+                != kube_deployment_status_replicas_available
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has unavailable replicas"
+              description: "Desired and available replica counts have disagreed for 10 minutes."
+
+          - alert: ContainerMemoryNearLimit
+            expr: |
+              container_memory_working_set_bytes{container!="", container!="POD"}
+                / on (namespace, pod, container)
+              kube_pod_container_resource_limits{resource="memory"} > 0.9
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ $labels.pod }} is at 90% of its memory limit"
+              description: "An OOMKill (exit code 137) is likely next. Raise the limit or fix the leak."
+
+      # ---------------- Node / infrastructure -------------------------
+      - name: node.alerts
+        rules:
+          - alert: NodeHighCPU
+            expr: |
+              100 - (avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Node {{ $labels.node }} CPU above 85%"
+
+          - alert: NodeLowMemory
+            expr: |
+              (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 15
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Node {{ $labels.node }} has less than 15% memory available"
+
+          - alert: NodeDiskFillingUp
+            expr: |
+              (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+                / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 15
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Node {{ $labels.node }} filesystem {{ $labels.mountpoint }} below 15% free"

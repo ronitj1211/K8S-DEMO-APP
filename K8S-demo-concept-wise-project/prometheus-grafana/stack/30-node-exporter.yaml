@@ -1,0 +1,74 @@
+# node-exporter reports HOST metrics: CPU per mode, memory, disk, filesystem,
+# network. It runs as a DaemonSet because there is exactly one host per node,
+# and it uses hostNetwork/hostPID plus /proc and /sys mounts to read the real
+# host state rather than the container's namespaced view.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      # Run everywhere, including control-plane nodes that carry taints.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.8.2
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+          ports:
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: root
+              mountPath: /host/root
+              mountPropagation: HostToContainer
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: proc
+          hostPath: { path: /proc }
+        - name: sys
+          hostPath: { path: /sys }
+        - name: root
+          hostPath: { path: / }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  clusterIP: None          # headless: we want every pod as its own target
+  selector:
+    app: node-exporter
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: 9100

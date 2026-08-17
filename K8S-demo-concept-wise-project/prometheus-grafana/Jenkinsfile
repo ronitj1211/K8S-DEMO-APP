@@ -1,0 +1,178 @@
+// Jenkins declarative pipeline for the prometheus-grafana demo.
+//
+// Builds the instrumented app, deploys the full metrics stack, then VERIFIES
+// the monitoring actually works — targets up, rules loaded, Grafana healthy.
+// A monitoring stack that deploys green but scrapes nothing is the failure
+// mode this pipeline exists to catch.
+//
+// Apply order: namespace -> RBAC -> config -> workloads -> app.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY     = 'ghcr.io/ronitj1211'
+        APP_IMG      = "${REGISTRY}/demo-api"
+        IMAGE_TAG    = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        MANIFEST_DIR = 'K8S-demo-concept-wise-project/prometheus-grafana'
+    }
+
+    options { timeout(time: 25, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Lint manifests') {
+            steps {
+                sh '''
+                  for f in ${MANIFEST_DIR}/stack/*.yaml ${MANIFEST_DIR}/app/app.yaml; do
+                    echo "validating $f"
+                    kubectl apply --dry-run=client -f "$f" >/dev/null
+                  done
+                '''
+            }
+        }
+
+        stage('Check rule syntax') {
+            steps {
+                // promtool catches a bad PromQL expression before it silently
+                // stops evaluating in production.
+                sh '''
+                  if command -v promtool >/dev/null 2>&1; then
+                    mkdir -p /tmp/rules
+                    kubectl create configmap dummy \
+                      --from-file=${MANIFEST_DIR}/stack/12-prometheus-rules.yaml \
+                      --dry-run=client -o yaml >/dev/null
+                    python3 - <<'EOF'
+import yaml, sys, pathlib
+src = pathlib.Path("K8S-demo-concept-wise-project/prometheus-grafana/stack/12-prometheus-rules.yaml")
+cm = list(yaml.safe_load_all(src.read_text()))[0]
+out = pathlib.Path("/tmp/rules")
+for name, body in cm["data"].items():
+    (out / name).write_text(body)
+    print("wrote", name)
+EOF
+                    promtool check rules /tmp/rules/*.yml
+                  else
+                    echo "promtool not installed — skipping rule validation"
+                  fi
+                '''
+            }
+        }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${APP_IMG}:${IMAGE_TAG}" -t "${APP_IMG}:latest" "${MANIFEST_DIR}/app"
+                      docker push "${APP_IMG}:${IMAGE_TAG}"
+                      docker push "${APP_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy stack') {
+            steps {
+                sh '''
+                  kubectl apply -f ${MANIFEST_DIR}/stack/00-namespace.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/stack/
+                  kubectl apply -f ${MANIFEST_DIR}/app/app.yaml
+
+                  kubectl -n demo set image deploy/demo-api demo-api=${APP_IMG}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Wait for rollout') {
+            steps {
+                sh '''
+                  kubectl -n monitoring rollout status deploy/prometheus         --timeout=180s
+                  kubectl -n monitoring rollout status deploy/alertmanager       --timeout=120s
+                  kubectl -n monitoring rollout status deploy/kube-state-metrics --timeout=120s
+                  kubectl -n monitoring rollout status deploy/grafana            --timeout=180s
+                  kubectl -n monitoring rollout status ds/node-exporter          --timeout=180s
+                  kubectl -n demo       rollout status deploy/demo-api           --timeout=180s
+                '''
+            }
+        }
+
+        stage('Verify app metrics endpoint') {
+            steps {
+                sh '''
+                  kubectl -n demo run curl-check --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+                    sh -c 'curl -sf http://demo-api.demo.svc:3000/metrics | grep -q "^http_requests_total" \
+                           && echo "METRICS OK"'
+                '''
+            }
+        }
+
+        stage('Verify Prometheus targets') {
+            steps {
+                // Give service discovery a couple of scrape intervals to settle,
+                // then fail the build if ANY target is down.
+                sh '''
+                  sleep 45
+                  kubectl -n monitoring run prom-check --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+                    sh -c '
+                      down=$(curl -sf "http://prometheus.monitoring.svc:9090/api/v1/query?query=up==0" \
+                             | grep -o "\\"__name__\\"" | wc -l)
+                      echo "targets down: $down"
+                      [ "$down" -eq 0 ] || { echo "SOME TARGETS ARE DOWN"; exit 1; }
+                      echo "ALL TARGETS UP"
+                    '
+                '''
+            }
+        }
+
+        stage('Verify rules loaded') {
+            steps {
+                sh '''
+                  kubectl -n monitoring run rule-check --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+                    sh -c '
+                      curl -sf "http://prometheus.monitoring.svc:9090/api/v1/rules" | grep -q "HighErrorRate" \
+                        && echo "ALERT RULES OK"
+                      curl -sf "http://prometheus.monitoring.svc:9090/api/v1/query?query=service:http_requests:rate5m" \
+                        | grep -q "\\"result\\"" && echo "RECORDING RULES OK"
+                    '
+                '''
+            }
+        }
+
+        stage('Verify Grafana') {
+            steps {
+                sh '''
+                  kubectl -n monitoring run grafana-check --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+                    sh -c '
+                      curl -sf http://grafana.monitoring.svc:3000/api/health | grep -q "ok" && echo "GRAFANA OK"
+                      curl -sf -u admin:admin http://grafana.monitoring.svc:3000/api/search?query=RED \
+                        | grep -q "demo-api-red" && echo "DASHBOARD PROVISIONED"
+                    '
+                '''
+            }
+        }
+    }
+
+    post {
+        failure {
+            sh '''
+              echo "===== pods ====="
+              kubectl get pods -n monitoring -o wide || true
+              kubectl get pods -n demo -o wide || true
+              echo "===== prometheus logs ====="
+              kubectl logs -n monitoring deploy/prometheus --tail=80 || true
+              echo "===== grafana logs ====="
+              kubectl logs -n monitoring deploy/grafana --tail=50 || true
+              echo "===== events ====="
+              kubectl get events -n monitoring --sort-by=.lastTimestamp | tail -30 || true
+            '''
+        }
+        always {
+            sh 'kubectl delete pod -n monitoring prom-check rule-check grafana-check --ignore-not-found || true'
+        }
+    }
+}

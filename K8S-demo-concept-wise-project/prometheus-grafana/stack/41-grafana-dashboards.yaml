@@ -1,0 +1,309 @@
+# Dashboard JSON, mounted into /var/lib/grafana/dashboards and picked up by
+# the file provider defined in 40-grafana-provisioning.yaml.
+#
+# Two dashboards:
+#   red-dashboard.json      — the service view (Rate, Errors, Duration)
+#   cluster-dashboard.json  — the infrastructure view (nodes, pods, restarts)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: monitoring
+data:
+  red-dashboard.json: |
+    {
+      "uid": "demo-api-red",
+      "title": "Demo API — RED (Rate / Errors / Duration)",
+      "tags": ["demo", "red"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": { "from": "now-30m", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Request rate (req/s)",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "decimals": 2, "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A", "expr": "sum(service:http_requests:rate5m)", "legendFormat": "total" }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Error ratio",
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "unit": "percentunit", "decimals": 3, "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 0.01 },
+                { "color": "red", "value": 0.05 } ] } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A", "expr": "sum(service:http_error_ratio:rate5m)", "legendFormat": "5xx ratio" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "p95 latency",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "decimals": 3, "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 0.5 },
+                { "color": "red", "value": 1 } ] } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A", "expr": "max(service:http_latency_p95:5m)", "legendFormat": "p95" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Ready pods",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 1 } ] } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A", "expr": "sum(up{job=\"kubernetes-pods\", app=\"demo-api\"})", "legendFormat": "scraped" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Request rate by status code",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (status) (rate(http_requests_total[5m]))",
+              "legendFormat": "{{status}}" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Latency percentiles",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "p50" },
+            { "refId": "B",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "p95" },
+            { "refId": "C",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "p99" }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Request rate by route",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (route) (rate(http_requests_total[5m]))",
+              "legendFormat": "{{route}}" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Per-pod request rate (load balancing check)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (pod) (rate(http_requests_total[5m]))",
+              "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Business: orders processed",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 20 },
+          "fieldConfig": {
+            "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 20 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (status) (rate(orders_processed_total[5m]))",
+              "legendFormat": "{{status}}" }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "In-flight requests (saturation)",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 20 },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum(http_requests_in_flight)",
+              "legendFormat": "in flight" }
+          ]
+        }
+      ]
+    }
+
+  cluster-dashboard.json: |
+    {
+      "uid": "cluster-health",
+      "title": "Cluster Health — Nodes & Pods",
+      "tags": ["demo", "cluster"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Node CPU utilisation %",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "unit": "percent", "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+              "legendFormat": "{{instance}}" }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Node memory available %",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "unit": "percent", "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "(node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+              "legendFormat": "{{instance}}" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Container memory working set (per pod)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": {
+            "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"demo\", container!=\"\"})",
+              "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Container CPU usage (per pod)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"demo\", container!=\"\"}[5m]))",
+              "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Pod restarts (cumulative)",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 0 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"demo\"})",
+              "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Deployment replicas: desired vs available",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 0 } },
+            "overrides": []
+          },
+          "targets": [
+            { "refId": "A",
+              "expr": "kube_deployment_spec_replicas{namespace=\"demo\"}",
+              "legendFormat": "{{deployment}} desired" },
+            { "refId": "B",
+              "expr": "kube_deployment_status_replicas_available{namespace=\"demo\"}",
+              "legendFormat": "{{deployment}} available" }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Scrape targets up",
+          "gridPos": { "h": 5, "w": 24, "x": 0, "y": 23 },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 1 } ] } },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "refId": "A", "expr": "sum by (job) (up)", "legendFormat": "{{job}}" }
+          ]
+        }
+      ]
+    }

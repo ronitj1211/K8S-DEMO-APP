@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-api
+  namespace: demo
+  labels:
+    app: demo-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo-api
+  template:
+    metadata:
+      labels:
+        app: demo-api
+      # These three annotations are the entire contract with Prometheus.
+      # The kubernetes-pods scrape job keeps only pods with scrape="true",
+      # then reads path and port from the other two.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "3000"
+    spec:
+      containers:
+        - name: demo-api
+          image: demo-api:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: SERVICE_NAME
+              value: demo-api
+          livenessProbe:
+            httpGet: { path: /healthz, port: 3000 }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /ready, port: 3000 }
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            # requests drive scheduling AND the HPA percentage math.
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-api
+  namespace: demo
+  labels:
+    app: demo-api
+spec:
+  type: NodePort
+  selector:
+    app: demo-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30300
+---
+# Continuously generates traffic so the dashboards have something to draw.
+# Hits a mix of fast, slow, and flaky endpoints.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: demo
+  labels:
+    app: loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                wget -q -O /dev/null http://demo-api.demo.svc:3000/api/orders
+                wget -q -O /dev/null http://demo-api.demo.svc:3000/flaky
+                wget -q -O /dev/null http://demo-api.demo.svc:3000/
+                sleep 1
+              done
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }

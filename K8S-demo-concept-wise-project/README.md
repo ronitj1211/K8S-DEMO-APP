@@ -35,12 +35,15 @@ The app is intentionally the same simple Node.js backend + HTML frontend everywh
 |---|---------|--------|-------------------|
 | 12 | **Logging (EFK)** | [elk-logging](./elk-logging/) | Elasticsearch + Fluent Bit (DaemonSet) + Kibana. Centralized log collection from every Pod. |
 | 13 | **Monitoring + NetworkPolicies** | [monitoring-networkpolicies](./monitoring-networkpolicies/) | Prometheus + Grafana scraping `/metrics`; default-deny + allow-list NetworkPolicies. |
+| 14 | **Prometheus + Grafana (deep dive)** | [prometheus-grafana](./prometheus-grafana/) | The full metrics stack: RED instrumentation, service discovery + relabeling, recording & alerting rules, Alertmanager routing, node-exporter, kube-state-metrics, provisioned dashboards, PromQL and cardinality. |
+
+> Folders 13 and 14 both run Prometheus. In **13** it's supporting cast for learning NetworkPolicies; **14** is the monitoring deep dive — rules, Alertmanager, exporters and provisioning, none of which 13 covers.
 
 ### Part D — GitOps & delivery
 
 | # | Concept | Folder | What you'll learn |
 |---|---------|--------|-------------------|
-| 14 | **GitOps with Argo CD** | [argocd](./argocd/) | Declarative CD from Git. Application CRD, auto-sync, self-heal, prune, App of Apps pattern. |
+| 15 | **GitOps with Argo CD** | [argocd](./argocd/) | Declarative CD from Git. Application CRD, auto-sync, self-heal, prune, App of Apps pattern. |
 
 The order is cumulative — each concept builds on the previous ones. You can jump to a specific folder if you already know the earlier material.
 

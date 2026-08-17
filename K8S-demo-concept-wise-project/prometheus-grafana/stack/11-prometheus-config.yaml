@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval:     15s     # how often to pull /metrics
+      evaluation_interval: 15s     # how often to evaluate rules
+      external_labels:
+        cluster: local-k3s
+
+    # Where to send alerts once a rule has been firing for its `for:` duration.
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager.monitoring.svc:9093"]
+
+    # Recording + alerting rules, mounted from the prometheus-rules ConfigMap.
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      # ---------------------------------------------------------------
+      # 1. Prometheus scraping itself. Always do this — if Prometheus is
+      #    unhealthy, nothing else you see can be trusted.
+      # ---------------------------------------------------------------
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      # ---------------------------------------------------------------
+      # 2. Application pods, discovered by annotation.
+      #    relabel_configs run BEFORE the scrape and decide two things:
+      #    which targets to keep, and what address/labels to use.
+      # ---------------------------------------------------------------
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # keep only pods annotated prometheus.io/scrape: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # override the metrics path if prometheus.io/path is set
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # rewrite the address to pod_ip:annotated_port
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          # copy pod labels onto the metrics (app=demo-api becomes a label)
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+          # don't scrape pods that aren't running
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: (Pending|Succeeded|Failed)
+
+      # ---------------------------------------------------------------
+      # 3. Node hardware metrics from node-exporter (CPU, RAM, disk, net).
+      # ---------------------------------------------------------------
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_endpoints_name]
+            action: keep
+            regex: node-exporter
+          - source_labels: [__meta_kubernetes_endpoint_node_name]
+            action: replace
+            target_label: node
+
+      # ---------------------------------------------------------------
+      # 4. kube-state-metrics: the STATE of Kubernetes objects.
+      #    Not resource usage — "replicas desired vs available", "pod
+      #    phase", "restart count". This is where most K8s alerts come from.
+      # ---------------------------------------------------------------
+      - job_name: kube-state-metrics
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_endpoints_name]
+            action: keep
+            regex: kube-state-metrics
+
+      # ---------------------------------------------------------------
+      # 5. The kubelet itself (node-level kubelet metrics).
+      # ---------------------------------------------------------------
+      - job_name: kubernetes-nodes
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true      # demo cluster; use a real CA in prod
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+
+      # ---------------------------------------------------------------
+      # 6. cAdvisor — per-container CPU/memory/network, built into the
+      #    kubelet. This is where container_memory_working_set_bytes lives,
+      #    the metric you use to catch an OOMKill before it happens.
+      # ---------------------------------------------------------------
+      - job_name: kubernetes-cadvisor
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
