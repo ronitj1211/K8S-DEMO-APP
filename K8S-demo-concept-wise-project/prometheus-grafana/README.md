@@ -525,7 +525,8 @@ up == 0
 
 ## What to do next
 
-1. [HOW_IT_CONNECTS.md](HOW_IT_CONNECTS.md) — the complete journey of one number, from `/proc/stat` on the node through node-exporter, Prometheus, and Grafana to a pixel in your browser. Every hop names the **exact file and line** that configures it, plus a command to verify that hop in isolation.
-2. [RUN-STEPS.md](RUN-STEPS.md) — bring it up on Colima/k3s and drive it end to end: watch targets appear, fire a real alert, see it arrive at the webhook.
-3. [INTERNALS.md](INTERNALS.md) — how a scrape actually works, the TSDB, staleness, relabeling order, and the alert state machine.
-4. [INTERVIEW.md](INTERVIEW.md) — Q&A with scenarios.
+1. [CONFIG-GUIDE.md](CONFIG-GUIDE.md) — **which file does what.** Every manifest, what it configures, what breaks without it, cross-file dependencies, and an "I want to change X → edit this file" lookup table.
+2. [HOW_IT_CONNECTS.md](HOW_IT_CONNECTS.md) — the complete journey of one number, from `/proc/stat` on the node through node-exporter, Prometheus, and Grafana to a pixel in your browser. Every hop names the **exact file and line** that configures it, plus a command to verify that hop in isolation.
+3. [RUN-STEPS.md](RUN-STEPS.md) — bring it up on Colima/k3s and drive it end to end: watch targets appear, fire a real alert, see it arrive at the webhook.
+4. [INTERNALS.md](INTERNALS.md) — how a scrape actually works, the TSDB, staleness, relabeling order, and the alert state machine.
+5. [INTERVIEW.md](INTERVIEW.md) — Q&A with scenarios.
