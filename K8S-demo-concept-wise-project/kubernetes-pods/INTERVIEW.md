@@ -63,11 +63,23 @@ They can also see each other's process namespace if `shareProcessNamespace: true
 Beyond `phase`, the `conditions` array has finer detail: `PodScheduled`, `Initialized`, `ContainersReady`, `Ready`.
 
 ### Q11. What's `imagePullPolicy: IfNotPresent` vs `Always`?
-- `Always` — pull on every Pod start. Required for `:latest` tags to work as expected.
-- `IfNotPresent` — use the local image if present (default for non-`:latest` tags).
-- `Never` — never pull; require the image to be preloaded.
+- `Always` — contact the registry on every Pod start. It still reuses cached layers if the digest matches, so the cost is one manifest lookup, not a full re-download.
+- `IfNotPresent` — if any image with that tag exists on the node, use it and never contact the registry.
+- `Never` — never pull; the image must already be on the node or the Pod fails with `ErrImageNeverPull`.
+
+**The default is not fixed** — it's derived from the tag: `:latest` or no tag → `Always`; any other tag → `IfNotPresent`. That implicit switch is the source of most surprises.
 
 Pinning to a specific tag + `IfNotPresent` is the safest combo for reproducibility.
+
+*Scenario 1 — the stale image.* A team tags every build `myapp:v2` and pushes it. Because the tag isn't `:latest`, the policy defaults to `IfNotPresent`. They `kubectl rollout restart`, the new Pod lands on a node that already has a `myapp:v2` layer cached from last week, and it silently runs **the old code**. Meanwhile a Pod scheduled onto a fresh node pulls the new image — so half the fleet runs one version and half runs another, with identical manifests. This is why you tag by **git SHA** rather than reusing a tag: `myapp:a3f9c21` can never be stale, because that content only ever had one meaning.
+
+*Scenario 2 — `:latest` in production.* A Deployment uses `myapp:latest`, so the policy is `Always`. A node reboots at 2am, its Pods restart, and they pull whatever `:latest` points at *now* — a build merged three hours ago that was never meant to be released. Nothing in Git changed, no rollout was triggered, and `kubectl rollout undo` can't help because the Deployment spec is identical. Never use `:latest` for anything you'd be paged about.
+
+*Scenario 3 — local development on k3s/minikube.* You `docker build -t k8s-demo-backend:1.0 .` and apply a manifest. With `IfNotPresent` this works, because k3s finds the locally built image. Switch it to `Always` and the Pod goes `ImagePullBackOff` — the cluster tries Docker Hub, finds no such image, and fails. That's why the manifests in this folder pin `imagePullPolicy: IfNotPresent` ([backend-pod.yaml:11](backend/backend-pod.yaml#L11)), and why the older root-level deployments use `Never` — an even stricter version that guarantees no registry call is ever attempted.
+
+*Scenario 4 — the security angle.* `IfNotPresent` skips the registry entirely, which also skips the **imagePullSecrets credential check**. In a multi-tenant cluster, a pod in namespace B can therefore run a private image already cached on that node from namespace A, without ever having permission to pull it. If image-level isolation matters, use `Always` (which re-authenticates every time) or enforce it with the `AlwaysPullImages` admission controller.
+
+**Interview-ready summary:** use `Always` with immutable digests (`myapp@sha256:...`) or when running `:latest` in dev; use `IfNotPresent` with SHA-pinned tags in production for fast, deterministic starts; use `Never` only for air-gapped or pre-baked-AMI setups. The real fix for all of these is **immutable tags** — then the policy barely matters.
 
 ### Q12. What are resource requests and limits?
 - **Requests** — guaranteed reservation. The scheduler uses requests to decide which node has room.
