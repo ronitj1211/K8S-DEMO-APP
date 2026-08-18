@@ -63,13 +63,84 @@ They can also see each other's process namespace if `shareProcessNamespace: true
 Beyond `phase`, the `conditions` array has finer detail: `PodScheduled`, `Initialized`, `ContainersReady`, `Ready`.
 
 ### Q11. What's `imagePullPolicy: IfNotPresent` vs `Always`?
-- `Always` — contact the registry on every Pod start. It still reuses cached layers if the digest matches, so the cost is one manifest lookup, not a full re-download.
-- `IfNotPresent` — if any image with that tag exists on the node, use it and never contact the registry.
-- `Never` — never pull; the image must already be on the node or the Pod fails with `ErrImageNeverPull`.
 
-**The default is not fixed** — it's derived from the tag: `:latest` or no tag → `Always`; any other tag → `IfNotPresent`. That implicit switch is the source of most surprises.
+`imagePullPolicy` tells the kubelet **when to contact the container registry** before starting a container.
 
-Pinning to a specific tag + `IfNotPresent` is the safest combo for reproducibility.
+---
+
+#### `imagePullPolicy: IfNotPresent`
+
+```yaml
+image: my-app:1.4
+imagePullPolicy: IfNotPresent
+```
+
+**Meaning:**
+
+Kubernetes checks whether the required image already exists on the **worker node**.
+
+- ✅ Image exists locally → use the existing image, **never contact the registry**
+- ❌ Image doesn't exist → pull it from the registry
+
+**Use it when:** the tag is immutable (a version or git SHA). Fastest startup, works offline, no registry dependency.
+
+---
+
+#### `imagePullPolicy: Always`
+
+```yaml
+image: my-app:latest
+imagePullPolicy: Always
+```
+
+**Meaning:**
+
+Every time Kubernetes creates or starts a container, it checks the container registry for the image.
+
+- ✅ Registry digest matches what's cached → reuse the local layers (fast — only a manifest lookup, not a re-download)
+- ❌ Registry has a newer digest → pull the new image
+- ⚠️ Registry unreachable → the Pod fails to start, even though the image is sitting on the node
+
+**Use it when:** the tag is mutable (`:latest`, `:dev`, `:staging`) and you always want the newest build.
+
+---
+
+#### `imagePullPolicy: Never`
+
+```yaml
+image: k8s-demo-backend:1.0
+imagePullPolicy: Never
+```
+
+**Meaning:**
+
+Kubernetes never contacts the registry at all.
+
+- ✅ Image exists locally → use it
+- ❌ Image doesn't exist → Pod fails immediately with `ErrImageNeverPull`
+
+**Use it when:** air-gapped clusters, or images pre-baked into the node AMI.
+
+---
+
+#### The default is decided by the tag
+
+You often don't set this field at all — and then Kubernetes picks for you:
+
+| Image tag | Default policy |
+|---|---|
+| `my-app:latest` | `Always` |
+| `my-app` (no tag) | `Always` |
+| `my-app:1.4` | `IfNotPresent` |
+| `my-app@sha256:...` | `IfNotPresent` |
+
+That implicit switch is where most surprises come from — the same manifest behaves differently purely because someone changed the tag.
+
+**Safest combination:** a specific immutable tag + `IfNotPresent`.
+
+---
+
+#### Where this bites in real life
 
 *Scenario 1 — the stale image.* A team tags every build `myapp:v2` and pushes it. Because the tag isn't `:latest`, the policy defaults to `IfNotPresent`. They `kubectl rollout restart`, the new Pod lands on a node that already has a `myapp:v2` layer cached from last week, and it silently runs **the old code**. Meanwhile a Pod scheduled onto a fresh node pulls the new image — so half the fleet runs one version and half runs another, with identical manifests. This is why you tag by **git SHA** rather than reusing a tag: `myapp:a3f9c21` can never be stale, because that content only ever had one meaning.
 
