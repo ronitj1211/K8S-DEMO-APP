@@ -1,0 +1,54 @@
+# The simplest HPA: scale on CPU utilisation.
+#
+# THE FORMULA
+#   desiredReplicas = ceil( currentReplicas x (currentMetric / targetMetric) )
+#
+# Worked example with the numbers below:
+#   requests.cpu = 200m, target = 50%  ->  target usage = 100m per pod
+#   3 pods averaging 180m each
+#   desired = ceil( 3 x (180 / 100) ) = ceil(5.4) = 6 replicas
+#
+# CRITICAL: utilisation is a percentage of the pod's REQUEST, never of the
+# node's capacity and never of the limit. A pod requesting 200m and using
+# 200m is at 100% — even if the node is 95% idle.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: load-lab-cpu
+  namespace: loadlab
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: load-lab
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      # React to a spike immediately — no waiting.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100          # allowed to DOUBLE...
+          periodSeconds: 15   # ...every 15s
+        - type: Pods
+          value: 4            # or add 4 pods per 15s
+          periodSeconds: 15
+      selectPolicy: Max       # whichever permits more
+    scaleDown:
+      # Shrink slowly. The window means HPA looks back 5 minutes and uses the
+      # HIGHEST recommendation in that period — so a brief dip won't cause a
+      # scale-down that immediately has to be undone (thrashing).
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+      selectPolicy: Min

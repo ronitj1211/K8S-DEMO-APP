@@ -1,0 +1,80 @@
+# Custom-metric HPA — scaling on something your APPLICATION reports rather
+# than on CPU. This is what production autoscaling usually looks like,
+# because CPU is a poor proxy for demand in I/O-bound services.
+#
+# REQUIRES the Prometheus Adapter, which registers itself as an APIService
+# for custom.metrics.k8s.io and translates HPA queries into PromQL.
+#
+#   HPA ──▶ custom.metrics.k8s.io ──▶ Prometheus Adapter ──▶ PromQL ──▶ Prometheus
+#
+# Install (pointing at the Prometheus from the prometheus-grafana folder):
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     -n monitoring \
+#     --set prometheus.url=http://prometheus.monitoring.svc \
+#     --set prometheus.port=9090 \
+#     --set rules.default=false \
+#     --set-file rules.custom=adapter-rules.yaml
+#
+# Verify the metric is being served BEFORE creating the HPA:
+#   kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1" | jq .
+#   kubectl get --raw \
+#     "/apis/custom.metrics.k8s.io/v1beta1/namespaces/loadlab/pods/*/app_queue_depth" | jq .
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: load-lab-queue
+  namespace: loadlab
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: load-lab
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    # type: Pods -> the metric is averaged ACROSS pods.
+    # "keep queue depth at ~30 items per pod": 300 queued items -> 10 pods.
+    - type: Pods
+      pods:
+        metric:
+          name: app_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "30"
+
+    # type: Object -> a metric describing a single object (an Ingress, a
+    # Service), NOT averaged per pod. Useful for total ingress RPS.
+    # - type: Object
+    #   object:
+    #     metric: { name: requests_per_second }
+    #     describedObject:
+    #       apiVersion: networking.k8s.io/v1
+    #       kind: Ingress
+    #       name: load-lab
+    #     target: { type: Value, value: "1000" }
+
+    # type: External -> a metric with no Kubernetes object at all, e.g.
+    # SQS queue length or Kafka consumer lag. This is the one people
+    # actually want most often, and it is what KEDA specialises in.
+    # - type: External
+    #   external:
+    #     metric:
+    #       name: sqs_messages_visible
+    #       selector:
+    #         matchLabels: { queue: orders }
+    #     target: { type: AverageValue, averageValue: "100" }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 180
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60

@@ -1,0 +1,55 @@
+# Multi-metric HPA.
+#
+# With several metrics, the HPA computes a desired replica count for EACH
+# one independently and then takes the MAXIMUM. It never averages them.
+# So any single metric can scale you up, but ALL of them must be low for
+# you to scale down. That is deliberately conservative.
+#
+#   cpu    -> wants 4 replicas  ┐
+#   memory -> wants 6 replicas  ├──> max = 7 replicas
+#   rps    -> wants 7 replicas  ┘
+#
+# Note this HPA and 30-hpa-cpu.yaml both target the same Deployment. Two
+# HPAs on one target FIGHT each other — apply only one at a time. That
+# conflict is itself a lesson; see RUN-STEPS.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: load-lab-multi
+  namespace: loadlab
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: load-lab
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    # 1. CPU as a percentage of request.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+    # 2. Memory as a percentage of request.
+    #    Memory-based scaling is usually a TRAP: most runtimes (JVM, Go,
+    #    Node) grow their heap and never return it, so memory stays high
+    #    after the load passes and the HPA never scales back down. Use it
+    #    only when your app's memory genuinely tracks concurrent work.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+
+    # 3. An absolute value rather than a percentage — "500 milli-cores per
+    #    pod", independent of what the pod requests.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: AverageValue
+          averageValue: 400m

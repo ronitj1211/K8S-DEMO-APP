@@ -1,0 +1,115 @@
+# Three companions to the HPA. VPA and KEDA need their operators installed
+# (see RUN-STEPS); the PDB is built in and always works.
+---
+# ==========================================================================
+# 1. VPA — VerticalPodAutoscaler: sets the RIGHT SIZE, not the right count.
+#
+# updateMode values:
+#   "Off"      -> recommendation ONLY. Read it, apply by hand. SAFEST, and
+#                 the mode you should actually use in production.
+#   "Initial"  -> applies recommendations to NEW pods only.
+#   "Auto"/"Recreate" -> EVICTS running pods to resize them. Disruptive.
+#
+# WARNING: VPA in Auto mode and an HPA on the SAME resource metric fight
+# each other. VPA raises the request; that instantly lowers the HPA's
+# utilisation percentage; the HPA scales in; load per pod rises; VPA raises
+# the request again. Use VPA on memory + HPA on CPU, or keep VPA in "Off".
+#
+# Install: https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler
+# ==========================================================================
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: load-lab-vpa
+  namespace: loadlab
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: load-lab
+  updatePolicy:
+    updateMode: "Off"          # recommendation only — read with `kubectl describe vpa`
+  resourcePolicy:
+    containerPolicies:
+      - containerName: load-lab
+        minAllowed:
+          cpu: 50m
+          memory: 32Mi
+        maxAllowed:
+          cpu: "1"
+          memory: 512Mi
+        # Only manage memory, leaving CPU to the HPA — this is the standard
+        # way to run both safely together.
+        controlledResources: ["memory"]
+---
+# ==========================================================================
+# 2. KEDA — event-driven autoscaling. The two things HPA cannot do:
+#      * scale to ZERO
+#      * scale on an external event source with no in-cluster metric
+#
+# KEDA doesn't replace the HPA — it CREATES one and feeds it via an
+# external metrics adapter. `kubectl get hpa` after applying this shows a
+# KEDA-managed HPA appear.
+#
+# Install: helm install keda kedacore/keda -n keda --create-namespace
+# ==========================================================================
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: load-lab-keda
+  namespace: loadlab
+spec:
+  scaleTargetRef:
+    name: load-lab
+  minReplicaCount: 0           # <-- scale to zero; a plain HPA cannot
+  maxReplicaCount: 20
+  pollingInterval: 15          # how often KEDA checks the trigger
+  cooldownPeriod: 120          # wait this long at zero load before scaling to 0
+  triggers:
+    # Prometheus trigger — reuses the Prometheus from ../prometheus-grafana
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        metricName: app_queue_depth
+        query: sum(app_queue_depth{namespace="loadlab"})
+        threshold: "30"
+    # Real-world triggers look like this (commented — need credentials):
+    # - type: aws-sqs-queue
+    #   metadata:
+    #     queueURL: https://sqs.ap-south-1.amazonaws.com/123456789012/orders
+    #     queueLength: "50"
+    #     awsRegion: ap-south-1
+    # - type: kafka
+    #   metadata:
+    #     bootstrapServers: kafka.svc:9092
+    #     consumerGroup: orders
+    #     topic: orders
+    #     lagThreshold: "100"
+    # - type: cron                       # scale up before a known daily peak
+    #   metadata:
+    #     timezone: Asia/Kolkata
+    #     start: "0 9 * * *"
+    #     end: "0 21 * * *"
+    #     desiredReplicas: "5"
+---
+# ==========================================================================
+# 3. PodDisruptionBudget — protects the FLOOR that autoscaling and node
+#    maintenance must respect.
+#
+# Scaling down, draining a node, and Karpenter consolidation are all
+# VOLUNTARY disruptions, and the eviction API honours this budget.
+# Without it, a node drain can take out every replica at once.
+#
+# Use maxUnavailable, not minAvailable: `minAvailable: 2` on a 2-replica
+# Deployment means NOTHING can ever be evicted and node drains hang forever.
+# ==========================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: load-lab-pdb
+  namespace: loadlab
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: load-lab

@@ -1,0 +1,71 @@
+# Namespace-level governance. These are how a platform team stops the
+# BestEffort problem happening at all, instead of hoping app teams behave.
+#
+# LimitRange   -> per-CONTAINER defaults and bounds (applied at admission)
+# ResourceQuota-> per-NAMESPACE totals (a hard ceiling on the whole team)
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: loadlab-limits
+  namespace: loadlab
+spec:
+  limits:
+    - type: Container
+      # Injected when the container specifies NO limits.
+      # This alone eliminates BestEffort pods from the namespace.
+      default:
+        cpu: 500m
+        memory: 256Mi
+      # Injected when the container specifies NO requests.
+      defaultRequest:
+        cpu: 100m
+        memory: 64Mi
+      # Hard bounds — a container asking outside this range is REJECTED
+      # at admission time, before it is ever scheduled.
+      min:
+        cpu: 50m
+        memory: 32Mi
+      max:
+        cpu: "2"
+        memory: 1Gi
+      # Caps the limit:request ratio. 4 means a container requesting 100m
+      # cannot have a limit above 400m — it stops teams from requesting
+      # almost nothing while reserving the right to burst enormously,
+      # which wrecks scheduling accuracy and node stability.
+      maxLimitRequestRatio:
+        cpu: "4"
+        memory: "4"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: loadlab-quota
+  namespace: loadlab
+spec:
+  hard:
+    # Sum of all requests/limits across every pod in the namespace.
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    # Object counts guard against runaway controllers too.
+    pods: "20"
+    services: "5"
+    persistentvolumeclaims: "4"
+---
+# A quota scoped by PriorityClass — production-critical workloads get their
+# own budget that batch jobs cannot consume.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: loadlab-high-priority
+  namespace: loadlab
+spec:
+  hard:
+    pods: "5"
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values: ["high-priority"]

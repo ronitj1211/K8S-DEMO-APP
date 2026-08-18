@@ -1,0 +1,67 @@
+# PriorityClass + preemption.
+#
+# When a high-priority pod cannot be scheduled because the node is full,
+# the scheduler EVICTS lower-priority pods to make room. This is separate
+# from QoS-based eviction:
+#
+#   PREEMPTION  -> scheduler, at SCHEDULING time, because of PRIORITY
+#   EVICTION    -> kubelet,   at RUNTIME,        because of NODE PRESSURE (QoS)
+#
+# Both can kill your pod. They are driven by different components for
+# different reasons, and interviewers like the distinction.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority   # the default
+description: "Customer-facing production workloads. May preempt batch."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+value: 100
+globalDefault: false
+# Never: this pod waits its turn rather than displacing anything. Use for
+# batch/best-effort work that should fill spare capacity but never disrupt.
+preemptionPolicy: Never
+description: "Batch and background work. Never preempts."
+---
+# The over-provisioning trick: low-priority pods that reserve real capacity
+# and do nothing. When a genuine pod needs space, these are preempted
+# INSTANTLY — so scale-up doesn't wait 60-90s for a new EC2 node to boot.
+# You are trading a little constant cost for much faster scale-up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: overprovisioning
+  namespace: loadlab
+  labels:
+    app: overprovisioning
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: overprovisioning
+  template:
+    metadata:
+      labels:
+        app: overprovisioning
+    spec:
+      priorityClassName: low-priority
+      terminationGracePeriodSeconds: 0    # get out of the way immediately
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            # Holds real capacity. Size this to one typical pod of the
+            # workload you want to be able to place instantly.
+            requests:
+              cpu: 200m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

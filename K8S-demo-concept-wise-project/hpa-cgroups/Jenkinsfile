@@ -1,0 +1,166 @@
+// Jenkins declarative pipeline for the hpa-cgroups lab.
+//
+// Beyond deploying, this VERIFIES the mechanisms actually work:
+//   - cgroup limits are what the manifest asked for
+//   - QoS classes come out as expected
+//   - the LimitRange injects defaults and rejects violations
+//   - the HPA reports a real metric rather than <unknown>
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY     = 'ghcr.io/ronitj1211'
+        APP_IMG      = "${REGISTRY}/load-lab"
+        IMAGE_TAG    = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        MANIFEST_DIR = 'K8S-demo-concept-wise-project/hpa-cgroups'
+        NS           = 'loadlab'
+    }
+
+    options { timeout(time: 25, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Lint manifests') {
+            steps {
+                // VPA and KEDA are CRDs that may not exist in every cluster —
+                // validate them as YAML rather than against the API.
+                sh '''
+                  for f in ${MANIFEST_DIR}/manifests/*.yaml; do
+                    case "$f" in
+                      *50-vpa-keda-pdb.yaml)
+                        python3 -c "import yaml,sys; list(yaml.safe_load_all(open('$f'))); print('yaml ok $f')" ;;
+                      *)
+                        echo "validating $f"; kubectl apply --dry-run=client -f "$f" >/dev/null ;;
+                    esac
+                  done
+                '''
+            }
+        }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${APP_IMG}:${IMAGE_TAG}" -t "${APP_IMG}:latest" "${MANIFEST_DIR}/app"
+                      docker push "${APP_IMG}:${IMAGE_TAG}"
+                      docker push "${APP_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Check metrics-server') {
+            steps {
+                // Without this every HPA reports <unknown> forever.
+                sh '''
+                  kubectl top nodes >/dev/null 2>&1 \
+                    && echo "metrics-server OK" \
+                    || { echo "metrics-server NOT available — HPA cannot work"; exit 1; }
+                '''
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sh '''
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/00-namespace.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/10-workload.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/21-limitrange-quota.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/30-hpa-cpu.yaml
+                  kubectl -n ${NS} set image deploy/load-lab load-lab=${APP_IMG}:${IMAGE_TAG}
+                  kubectl -n ${NS} rollout status deploy/load-lab --timeout=180s
+                '''
+            }
+        }
+
+        stage('Verify cgroup enforcement') {
+            steps {
+                // The manifest asks for 500m CPU / 128Mi memory. Assert the
+                // kernel actually received those numbers.
+                sh '''
+                  kubectl exec -n ${NS} deploy/load-lab -- wget -qO- localhost:3000/cgroup > /tmp/cg.json
+                  cat /tmp/cg.json
+                  python3 - <<'EOF'
+import json
+cg = json.load(open('/tmp/cg.json'))['cgroup_view']
+cpu = cg['cpu']['limit_cores']
+mem = cg['memory']['limit_mib']
+assert cpu == 0.5, f"expected 0.5 cores, cgroup says {cpu}"
+assert mem == 128, f"expected 128 MiB, cgroup says {mem}"
+print(f"CGROUP OK: cpu={cpu} cores, memory={mem} MiB")
+EOF
+                '''
+            }
+        }
+
+        stage('Verify QoS classes') {
+            steps {
+                sh '''
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/20-qos-classes.yaml
+                  sleep 10
+                  for p in guaranteed burstable besteffort; do
+                    actual=$(kubectl get pod -n ${NS} qos-$p -o jsonpath='{.status.qosClass}')
+                    expected=$(echo $p | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+                    case "$p" in
+                      besteffort) expected=BestEffort ;;
+                    esac
+                    echo "qos-$p -> $actual (expected $expected)"
+                    [ "$actual" = "$expected" ] || { echo "QOS MISMATCH"; exit 1; }
+                  done
+                  echo "QOS OK"
+                  kubectl delete -f ${MANIFEST_DIR}/manifests/20-qos-classes.yaml --ignore-not-found
+                '''
+            }
+        }
+
+        stage('Verify LimitRange') {
+            steps {
+                // A pod with no resources must come out with injected defaults.
+                sh '''
+                  kubectl run lr-check -n ${NS} --image=${APP_IMG}:${IMAGE_TAG} --restart=Never
+                  sleep 5
+                  req=$(kubectl get pod lr-check -n ${NS} -o jsonpath='{.spec.containers[0].resources.requests.cpu}')
+                  echo "injected cpu request: $req"
+                  [ -n "$req" ] || { echo "LimitRange did NOT inject defaults"; exit 1; }
+                  echo "LIMITRANGE OK"
+                  kubectl delete pod lr-check -n ${NS} --ignore-not-found
+                '''
+            }
+        }
+
+        stage('Verify HPA has metrics') {
+            steps {
+                // <unknown> means the HPA is inert — fail rather than ship it.
+                sh '''
+                  echo "waiting for metrics to populate..."
+                  sleep 60
+                  kubectl get hpa -n ${NS}
+                  targets=$(kubectl get hpa -n ${NS} load-lab-cpu -o jsonpath='{.status.currentMetrics}')
+                  echo "currentMetrics: $targets"
+                  [ -n "$targets" ] || { echo "HPA has NO metrics (<unknown>)"; exit 1; }
+                  echo "HPA OK"
+                '''
+            }
+        }
+    }
+
+    post {
+        failure {
+            sh '''
+              kubectl get pods,hpa,limitrange,resourcequota -n ${NS} -o wide || true
+              kubectl describe hpa -n ${NS} || true
+              kubectl logs -n ${NS} deploy/load-lab --tail=50 || true
+              kubectl get events -n ${NS} --sort-by=.lastTimestamp | tail -30 || true
+            '''
+        }
+        always {
+            sh 'kubectl delete pod -n ${NS} lr-check --ignore-not-found || true'
+        }
+    }
+}

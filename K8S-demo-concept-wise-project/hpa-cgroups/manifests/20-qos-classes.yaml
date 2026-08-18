@@ -1,0 +1,67 @@
+# Three pods that differ ONLY in their resources block, producing the three
+# QoS classes. Kubernetes assigns QoS automatically — you never set it.
+#
+#   Guaranteed : every container has requests == limits for BOTH cpu & memory
+#   Burstable  : at least one request set, but not matching limits
+#   BestEffort : no requests and no limits at all
+#
+# QoS decides who gets evicted first when the node runs out of memory:
+#   BestEffort -> Burstable (over-request first) -> Guaranteed (last)
+#
+# Verify with:
+#   kubectl get pods -n loadlab -o custom-columns=\
+#   NAME:.metadata.name,QOS:.status.qosClass
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-guaranteed
+  namespace: loadlab
+  labels: { demo: qos, class: guaranteed }
+spec:
+  containers:
+    - name: app
+      image: load-lab:1.0
+      imagePullPolicy: IfNotPresent
+      resources:
+        # requests == limits, both cpu AND memory -> Guaranteed.
+        # Note: if you omit requests entirely but set limits, Kubernetes
+        # DEFAULTS requests to equal limits, which also yields Guaranteed.
+        requests: { cpu: 200m, memory: 128Mi }
+        limits: { cpu: 200m, memory: 128Mi }
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-burstable
+  namespace: loadlab
+  labels: { demo: qos, class: burstable }
+spec:
+  containers:
+    - name: app
+      image: load-lab:1.0
+      imagePullPolicy: IfNotPresent
+      resources:
+        # request < limit -> Burstable. Can use spare capacity when it's
+        # free, but that headroom is not reserved for it.
+        requests: { cpu: 100m, memory: 64Mi }
+        limits: { cpu: 500m, memory: 256Mi }
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-besteffort
+  namespace: loadlab
+  labels: { demo: qos, class: besteffort }
+spec:
+  containers:
+    - name: app
+      image: load-lab:1.0
+      imagePullPolicy: IfNotPresent
+      # No resources block at all -> BestEffort.
+      # The scheduler thinks this pod needs nothing, so it can be packed
+      # anywhere — and it is the FIRST thing killed under node pressure.
+      # Never do this in production.
+  restartPolicy: Never

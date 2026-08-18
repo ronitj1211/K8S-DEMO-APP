@@ -28,6 +28,9 @@ The app is intentionally the same simple Node.js backend + HTML frontend everywh
 | 9 | **StatefulSets + Storage** | [statefulsets-storage](./statefulsets-storage/) | StatefulSets, per-Pod PVCs via `volumeClaimTemplates`, headless Services, ordered rollout. |
 | 10 | **Jobs + RBAC** | [jobs-rbac](./jobs-rbac/) | Jobs, CronJobs, Namespaces, ServiceAccounts, Roles, RoleBindings, `auth can-i`. |
 | 11 | **Autoscaling + Resources** | [autoscaling-resources](./autoscaling-resources/) | HPA v2, CPU/memory requests + limits, QoS classes, metrics-server. |
+| 11b | **HPA & cgroups (deep dive)** | [hpa-cgroups](./hpa-cgroups/) | Read the real cgroup files inside a container, measure CFS throttling, cause an OOMKill on purpose, custom-metric HPA, KEDA, VPA, LimitRange/ResourceQuota, PriorityClass + preemption. 7 flow diagrams. |
+
+> Folder 11 introduces HPA and resources; **11b** is the hands-on deep dive that proves the enforcement rather than describing it.
 
 ### Part C — Observability & network security
 
