@@ -310,6 +310,7 @@ kubectl get events -n <ns> | grep -i evict
 
 | Doc | Contents |
 |---|---|
+| **[CONCEPTS.md](CONCEPTS.md)** | **Start here if the vocabulary is new.** What it is → every term defined (quota, period, shares, QoS, throttling, working set, tolerance…) → how it works stage by stage → how to configure it and **which file each thing goes in** |
 | [CGROUPS.md](CGROUPS.md) | Hands-on: read the cgroup files, prove enforcement, measure throttling, v1 vs v2 |
 | [RUN-STEPS.md](RUN-STEPS.md) | Walkthrough — trigger throttling, cause an OOMKill, drive the HPA, watch preemption |
 | [INTERVIEW.md](INTERVIEW.md) | 40 Q&A with scenarios |
