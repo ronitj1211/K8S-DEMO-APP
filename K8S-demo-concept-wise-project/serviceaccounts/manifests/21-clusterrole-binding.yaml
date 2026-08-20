@@ -1,0 +1,28 @@
+# CLUSTER-WIDE permissions: ClusterRole + ClusterRoleBinding.
+#
+# Use a ClusterRole when the resource is cluster-scoped (nodes, namespaces,
+# PVs, CRDs) or when an identity genuinely needs the same access in every
+# namespace (monitoring agents, log shippers, ingress controllers).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-and-pod-viewer      # no namespace — ClusterRoles are cluster-scoped
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-and-pod-viewer-binding
+subjects:
+  - kind: ServiceAccount
+    name: sa-cluster-viewer
+    namespace: identity          # the SA lives in a namespace even though
+                                 # the binding is cluster-wide
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-and-pod-viewer

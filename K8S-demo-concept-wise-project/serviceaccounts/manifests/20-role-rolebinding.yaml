@@ -1,0 +1,52 @@
+# NAMESPACED permissions: Role + RoleBinding.
+#
+# Role        = a list of allowed (apiGroup, resource, verb) combinations
+# RoleBinding = attaches a Role to a SUBJECT (ServiceAccount / User / Group)
+#
+# RBAC is PURELY ADDITIVE and default-deny:
+#   - there is no "deny" rule in Kubernetes RBAC
+#   - anything not explicitly allowed is forbidden
+#   - multiple bindings UNION together
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+  namespace: identity
+rules:
+  - apiGroups: [""]                        # "" = the core API group (v1)
+    resources: ["pods", "pods/log"]        # subresources are separate entries
+    verbs: ["get", "list", "watch"]
+  # Deliberately NOT granting secrets — the app demo proves this returns 403.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-reader-binding
+  namespace: identity
+subjects:
+  - kind: ServiceAccount
+    name: sa-pod-reader
+    namespace: identity        # required even inside the same namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role                   # could also be ClusterRole — see the note below
+  name: pod-reader
+---
+# A RoleBinding may reference a CLUSTERRole. That grants the ClusterRole's
+# rules but ONLY within this namespace. It's how the built-in "view",
+# "edit" and "admin" ClusterRoles are reused per-namespace instead of
+# being redefined for every team.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: namespace-viewer
+  namespace: identity
+subjects:
+  - kind: ServiceAccount
+    name: sa-pod-reader
+    namespace: identity
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole            # cluster-scoped ROLE...
+  name: view                   # ...applied within THIS namespace only

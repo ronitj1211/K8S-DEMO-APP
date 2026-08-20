@@ -27,6 +27,10 @@ The app is intentionally the same simple Node.js backend + HTML frontend everywh
 | 8 | **PersistentVolumes (PV/PVC)** | [persistent-volumes](./persistent-volumes/) | PV, PVC, StorageClass, dynamic vs static provisioning, access modes, reclaim policy, data persistence across Pod restarts. |
 | 9 | **StatefulSets + Storage** | [statefulsets-storage](./statefulsets-storage/) | StatefulSets, per-Pod PVCs via `volumeClaimTemplates`, headless Services, ordered rollout. |
 | 10 | **Jobs + RBAC** | [jobs-rbac](./jobs-rbac/) | Jobs, CronJobs, Namespaces, ServiceAccounts, Roles, RoleBindings, `auth can-i`. |
+| 10b | **ServiceAccounts (deep dive)** | [serviceaccounts](./serviceaccounts/) | Pod identity end to end: decode a real token from inside a Pod, bound vs legacy tokens, projected volumes and audiences, `automountServiceAccountToken`, RBAC 401-vs-403, IRSA / GKE / Azure workload identity, and five escalation paths. |
+
+> Folder 10 covers ServiceAccounts as part of a Jobs+RBAC chapter; **10b** is the identity deep dive — tokens, audiences, cloud federation and escalation.
+
 | 11 | **Autoscaling + Resources** | [autoscaling-resources](./autoscaling-resources/) | HPA v2, CPU/memory requests + limits, QoS classes, metrics-server. |
 | 11b | **HPA & cgroups (deep dive)** | [hpa-cgroups](./hpa-cgroups/) | Read the real cgroup files inside a container, measure CFS throttling, cause an OOMKill on purpose, custom-metric HPA, KEDA, VPA, LimitRange/ResourceQuota, PriorityClass + preemption. 7 flow diagrams. |
 

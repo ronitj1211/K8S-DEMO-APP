@@ -1,0 +1,85 @@
+# WHAT NOT TO DO — and exactly why each one is dangerous.
+#
+# Apply this ONLY in a throwaway cluster. It exists so you can see the
+# escalation paths for yourself and recognise them in a review.
+---
+# DANGER 1: cluster-admin bound to a ServiceAccount.
+#
+# Anyone who can exec into a Pod using this SA, or who achieves RCE in it,
+# owns the entire cluster. They can read every Secret in every namespace,
+# create privileged Pods on any node, and mount the host filesystem.
+#
+# This is depressingly common in Helm charts that "just needed it to work".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: DANGER-sa-cluster-admin
+  annotations:
+    warning: "DO NOT APPLY IN A REAL CLUSTER"
+subjects:
+  - kind: ServiceAccount
+    name: sa-nothing
+    namespace: identity
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+---
+# DANGER 2: read access to Secrets cluster-wide.
+#
+# "It's only read access" is wrong. Secrets contain database passwords, API
+# keys — and the ServiceAccount tokens of every other identity. Reading
+# secrets is therefore a path to BECOMING any other ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: DANGER-secret-reader
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+# DANGER 3: the escalate / bind verbs.
+#
+# Normally RBAC prevents you granting permissions you don't hold yourself
+# (privilege-escalation prevention). These two verbs REMOVE that guard:
+#   escalate -> create a Role with permissions beyond your own
+#   bind     -> bind an existing Role you don't hold
+# Together they are equivalent to cluster-admin, indirectly.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: DANGER-can-escalate
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+    verbs: ["create", "escalate", "bind"]
+---
+# DANGER 4: create/exec on Pods in a namespace.
+#
+# If you can create a Pod, you can set serviceAccountName to ANY SA in that
+# namespace and read its token — so "create pods" implicitly grants every
+# identity in the namespace. If you can exec, you can read the token of any
+# running Pod. Pod-create is far closer to admin than it looks.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: DANGER-pod-creator
+  namespace: identity
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec"]
+    verbs: ["create", "get", "list"]
+---
+# DANGER 5: wildcards.
+#
+# Never ship this. It is cluster-admin written less obviously, and it
+# silently grants access to every CRD installed in the future.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: DANGER-wildcard
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]

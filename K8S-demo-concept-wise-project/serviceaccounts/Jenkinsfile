@@ -1,0 +1,189 @@
+// Jenkins declarative pipeline for the serviceaccounts lab.
+//
+// The verification stages assert IDENTITY BEHAVIOUR, not just rollout success:
+//   - an unbound SA authenticates but is refused (403, not 401)
+//   - a Role grants pods but not secrets, and never cluster-scoped nodes
+//   - a ClusterRole does grant nodes
+//   - automountServiceAccountToken: false leaves no credential (401)
+//
+// A cluster where these assertions pass has working RBAC. One where they
+// silently pass everything has a cluster-admin binding somewhere.
+
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY     = 'ghcr.io/ronitj1211'
+        APP_IMG      = "${REGISTRY}/identity-lab"
+        IMAGE_TAG    = "${env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER}"
+        MANIFEST_DIR = 'K8S-demo-concept-wise-project/serviceaccounts'
+        NS           = 'identity'
+    }
+
+    options { timeout(time: 20, unit: 'MINUTES'); disableConcurrentBuilds() }
+
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+
+        stage('Lint manifests') {
+            steps {
+                // 70-danger-* is intentionally dangerous and must never be applied
+                // by CI. Validate it as YAML only.
+                sh '''
+                  for f in ${MANIFEST_DIR}/manifests/*.yaml; do
+                    case "$f" in
+                      *70-danger-escalation.yaml)
+                        python3 -c "import yaml; list(yaml.safe_load_all(open('$f'))); print('yaml ok (NOT applied): $f')" ;;
+                      *)
+                        echo "validating $f"; kubectl apply --dry-run=client -f "$f" >/dev/null ;;
+                    esac
+                  done
+                '''
+            }
+        }
+
+        stage('Guard: no dangerous RBAC in the applied set') {
+            steps {
+                // Fail the build if a cluster-admin binding or a wildcard rule
+                // sneaks into anything CI actually applies.
+                sh '''
+                  bad=0
+                  for f in ${MANIFEST_DIR}/manifests/*.yaml; do
+                    case "$f" in *70-danger-escalation.yaml) continue ;; esac
+                    if grep -q 'name: cluster-admin' "$f"; then
+                      echo "REFUSING: cluster-admin reference in $f"; bad=1
+                    fi
+                    if python3 - "$f" <<'EOF'
+import sys, yaml
+hits = []
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d or d.get("kind") not in ("Role", "ClusterRole"):
+        continue
+    for r in d.get("rules") or []:
+        if "*" in (r.get("verbs") or []) and "*" in (r.get("resources") or []):
+            hits.append(d["metadata"]["name"])
+if hits:
+    print("wildcard rule in:", ", ".join(hits))
+    sys.exit(1)
+EOF
+                    then :; else echo "REFUSING: wildcard RBAC in $f"; bad=1; fi
+                  done
+                  [ "$bad" -eq 0 ] || exit 1
+                  echo "RBAC GUARD OK"
+                '''
+            }
+        }
+
+        stage('Build & push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'
+                )]) {
+                    sh '''
+                      echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+                      docker build -t "${APP_IMG}:${IMAGE_TAG}" -t "${APP_IMG}:latest" "${MANIFEST_DIR}/app"
+                      docker push "${APP_IMG}:${IMAGE_TAG}"
+                      docker push "${APP_IMG}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sh '''
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/00-namespace.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/10-serviceaccounts.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/20-role-rolebinding.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/21-clusterrole-binding.yaml
+                  kubectl apply -f ${MANIFEST_DIR}/manifests/30-workload.yaml
+
+                  for d in app-nothing app-pod-reader app-cluster-viewer app-no-token; do
+                    kubectl -n ${NS} set image deploy/$d app=${APP_IMG}:${IMAGE_TAG}
+                    kubectl -n ${NS} rollout status deploy/$d --timeout=120s
+                  done
+                '''
+            }
+        }
+
+        stage('Assert: no auto-created token Secrets') {
+            steps {
+                // Regression guard for the 1.24+ behaviour.
+                sh '''
+                  n=$(kubectl get sa -n ${NS} -o json \
+                      | python3 -c "import json,sys; print(sum(len(i.get('secrets') or []) for i in json.load(sys.stdin)['items']))")
+                  echo "token Secrets attached to SAs: $n"
+                  [ "$n" -eq 0 ] || { echo "UNEXPECTED legacy token Secrets present"; exit 1; }
+                  echo "NO LEGACY TOKENS OK"
+                '''
+            }
+        }
+
+        stage('Assert: identity behaviour') {
+            steps {
+                sh '''
+                  check() {   # deployment, endpoint, expected verdict substring
+                    got=$(kubectl exec -n ${NS} deploy/$1 -- wget -qO- "localhost:3000/api/$2" 2>/dev/null \
+                          | python3 -c "import json,sys; print(json.load(sys.stdin)['verdict'])")
+                    printf "  %-20s /api/%-8s -> %s\\n" "$1" "$2" "$got"
+                    case "$got" in
+                      *$3*) ;;
+                      *) echo "    MISMATCH: expected '$3'"; exit 1 ;;
+                    esac
+                  }
+
+                  echo "unbound SA: authenticates, then forbidden"
+                  check app-nothing        pods    FORBIDDEN
+                  check app-nothing        secrets FORBIDDEN
+
+                  echo "namespaced Role: pods yes, secrets no, nodes no"
+                  check app-pod-reader     pods    ALLOWED
+                  check app-pod-reader     secrets FORBIDDEN
+                  check app-pod-reader     nodes   FORBIDDEN
+
+                  echo "ClusterRole: cluster-scoped nodes now allowed"
+                  check app-cluster-viewer nodes   ALLOWED
+
+                  echo "no token mounted: 401, not 403"
+                  check app-no-token       pods    UNAUTHENTICATED
+
+                  echo "IDENTITY BEHAVIOUR OK"
+                '''
+            }
+        }
+
+        stage('Assert: token is bound and audience-scoped') {
+            steps {
+                sh '''
+                  kubectl exec -n ${NS} deploy/app-pod-reader -- wget -qO- localhost:3000/whoami > /tmp/who.json
+                  python3 - <<'EOF'
+import json
+d = json.load(open('/tmp/who.json'))
+assert d['token_mounted'] is True, "no token mounted"
+c = d['claims']
+assert c['sub'] == 'system:serviceaccount:identity:sa-pod-reader', c['sub']
+assert c['bound_object'] and c['bound_object'].get('pod'), "token is NOT bound to a Pod"
+assert c['aud'], "token has no audience"
+print("TOKEN OK:", c['sub'])
+print("  bound to pod:", c['bound_object']['pod']['name'])
+print("  audience:", c['aud'])
+EOF
+                '''
+            }
+        }
+    }
+
+    post {
+        failure {
+            sh '''
+              kubectl get pods,sa,role,rolebinding -n ${NS} -o wide || true
+              kubectl get clusterrole node-and-pod-viewer -o yaml || true
+              for d in app-nothing app-pod-reader app-cluster-viewer app-no-token; do
+                echo "--- $d"; kubectl logs -n ${NS} deploy/$d --tail=30 || true
+              done
+              kubectl get events -n ${NS} --sort-by=.lastTimestamp | tail -20 || true
+            '''
+        }
+    }
+}

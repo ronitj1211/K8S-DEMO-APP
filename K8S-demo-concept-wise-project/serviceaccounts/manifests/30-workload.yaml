@@ -1,0 +1,116 @@
+# Four Deployments of the SAME image, differing ONLY in which identity they
+# run as. Hit /whoami and /api/* on each to see RBAC behave differently.
+---
+# 1. Explicit SA with NO permissions.
+#    Token mounts and authenticates fine -> then 403 on everything.
+#    Lesson: authentication and authorization are separate steps.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-nothing
+  namespace: identity
+  labels: { app: app-nothing }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: app-nothing } }
+  template:
+    metadata:
+      labels: { app: app-nothing }
+    spec:
+      serviceAccountName: sa-nothing        # <-- the identity, on the POD spec
+      containers:
+        - name: app
+          image: identity-lab:1.0
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 3000 }]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+---
+# 2. Namespaced pod-read permission. /api/pods = 200, /api/secrets = 403,
+#    /api/nodes = 403 (cluster-scoped, and a Role can never grant that).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-pod-reader
+  namespace: identity
+  labels: { app: app-pod-reader }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: app-pod-reader } }
+  template:
+    metadata:
+      labels: { app: app-pod-reader }
+    spec:
+      serviceAccountName: sa-pod-reader
+      containers:
+        - name: app
+          image: identity-lab:1.0
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 3000 }]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+---
+# 3. Cluster-wide read. /api/nodes and /api/allpods now succeed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-cluster-viewer
+  namespace: identity
+  labels: { app: app-cluster-viewer }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: app-cluster-viewer } }
+  template:
+    metadata:
+      labels: { app: app-cluster-viewer }
+    spec:
+      serviceAccountName: sa-cluster-viewer
+      containers:
+        - name: app
+          image: identity-lab:1.0
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 3000 }]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+---
+# 4. NO TOKEN AT ALL. /whoami reports token_mounted: false and every API
+#    call returns 401 rather than 403 — there is no identity to authorize.
+#
+#    This is the correct configuration for the vast majority of application
+#    Pods, which never call the Kubernetes API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-no-token
+  namespace: identity
+  labels: { app: app-no-token }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: app-no-token } }
+  template:
+    metadata:
+      labels: { app: app-no-token }
+    spec:
+      serviceAccountName: sa-nothing
+      automountServiceAccountToken: false    # <-- Pod-level override
+      containers:
+        - name: app
+          image: identity-lab:1.0
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 3000 }]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-pod-reader
+  namespace: identity
+spec:
+  type: NodePort
+  selector: { app: app-pod-reader }
+  ports: [{ port: 3000, targetPort: 3000, nodePort: 30500 }]

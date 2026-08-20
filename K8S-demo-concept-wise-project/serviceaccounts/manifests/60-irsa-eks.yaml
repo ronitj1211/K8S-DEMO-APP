@@ -1,0 +1,54 @@
+# CLOUD IDENTITY FEDERATION — the ServiceAccount as an AWS identity.
+#
+# IRSA (IAM Roles for Service Accounts) lets a Pod assume an AWS IAM role
+# using its Kubernetes ServiceAccount token, with NO AWS keys anywhere.
+#
+# The one annotation below is the entire Kubernetes-side configuration.
+# Everything else is AWS-side (an OIDC provider and a role trust policy).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: s3-reader
+  namespace: identity
+  annotations:
+    # The role this SA may assume. Must exist in IAM, and its trust policy
+    # must name this exact namespace/serviceaccount pair.
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/eks-s3-reader
+    # Optional tuning:
+    # eks.amazonaws.com/audience: sts.amazonaws.com        (default)
+    # eks.amazonaws.com/sts-regional-endpoints: "true"     (recommended)
+    # eks.amazonaws.com/token-expiration: "86400"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3-app
+  namespace: identity
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: s3-app } }
+  template:
+    metadata:
+      labels: { app: s3-app }
+    spec:
+      serviceAccountName: s3-reader     # <-- that's all the app needs
+      containers:
+        - name: app
+          image: identity-lab:1.0
+          imagePullPolicy: IfNotPresent
+          # A mutating webhook (the EKS Pod Identity Webhook) sees the
+          # annotated SA and INJECTS these automatically — you do not write
+          # them yourself:
+          #
+          #   env:
+          #     AWS_ROLE_ARN=arn:aws:iam::...:role/eks-s3-reader
+          #     AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token
+          #     AWS_STS_REGIONAL_ENDPOINTS=regional
+          #   volumeMounts:
+          #     - projected SA token with audience: sts.amazonaws.com
+          #
+          # The AWS SDK finds those env vars and calls
+          # sts:AssumeRoleWithWebIdentity on its own. No code change needed.
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }

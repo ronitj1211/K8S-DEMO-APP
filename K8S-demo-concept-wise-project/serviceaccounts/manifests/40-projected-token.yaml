@@ -1,0 +1,49 @@
+# EXPLICIT projected token — controlling audience and lifetime yourself.
+#
+# Since Kubernetes 1.22 the token the kubelet mounts is already a bound,
+# short-lived, auto-rotated projected token. But you can declare your own
+# when you need a DIFFERENT audience or expiry — the usual reason being a
+# token meant for an external service (Vault, a cloud OIDC provider, your
+# own API) rather than for the Kubernetes API server.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-custom-token
+  namespace: identity
+spec:
+  serviceAccountName: sa-pod-reader
+  containers:
+    - name: app
+      image: identity-lab:1.0
+      imagePullPolicy: IfNotPresent
+      volumeMounts:
+        # Mounted somewhere OTHER than the default path, so both the
+        # default token and this custom one coexist and can be compared.
+        - name: vault-token
+          mountPath: /var/run/secrets/tokens
+          readOnly: true
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
+  volumes:
+    - name: vault-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: vault-token
+              # audience: who this token is FOR. The receiving service must
+              # verify the "aud" claim matches itself. A token minted for
+              # "vault" is rejected by the API server, and vice versa —
+              # this is what stops a stolen token being replayed elsewhere.
+              audience: vault
+              # expirationSeconds: minimum 600 (10 min). The kubelet rotates
+              # the file at ~80% of its lifetime, so the app must RE-READ
+              # the file rather than caching the value at startup.
+              expirationSeconds: 3600
+---
+# Comparing the two tokens inside this Pod is the whole point:
+#
+#   /var/run/secrets/kubernetes.io/serviceaccount/token   aud: [https://kubernetes.default.svc]
+#   /var/run/secrets/tokens/vault-token                   aud: [vault]
+#
+# Same ServiceAccount, same Pod, two tokens that are NOT interchangeable.
