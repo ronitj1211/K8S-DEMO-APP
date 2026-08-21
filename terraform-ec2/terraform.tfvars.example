@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+
+region      = "ap-south-1"
+project     = "demo"
+environment = "dev"
+
+instance_type    = "t3.micro"   # free-tier eligible
+root_volume_size = 8
+
+# --- SSH access (optional) -------------------------------------------------
+# Leave both unset to use SSM Session Manager instead — no open port 22,
+# no key files to manage, and every session is logged to CloudTrail.
+#
+# key_name          = "my-existing-keypair"
+# allowed_ssh_cidrs = ["203.0.113.42/32"]   # YOUR public IP only
+
+# --- Pin a subnet (optional) -----------------------------------------------
+# By default the first subnet of the default VPC is used.
+# subnet_id = "subnet-0123456789abcdef0"

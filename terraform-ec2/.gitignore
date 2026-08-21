@@ -1,0 +1,30 @@
+# Terraform state — contains resource IDs and can contain SECRETS in plain
+# text. Never commit it. Use a remote backend (S3 + DynamoDB) for real work.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Provider plugins and module cache — large, and re-downloadable by `init`.
+.terraform/
+.terraform.lock.hcl.bak
+
+# Saved plans can contain sensitive values.
+*.tfplan
+tfplan
+plan.out
+
+# Real variable files often hold account IDs, IPs and secrets.
+# The .example file IS committed.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Crash logs and local overrides
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
