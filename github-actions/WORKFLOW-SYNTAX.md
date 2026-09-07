@@ -61,11 +61,101 @@ on:
     types: [completed]
 ```
 
+## Which branch's workflow file actually runs?
+
+This causes more confusion than any other part of Actions, so it's worth
+being precise. The rule differs by event type.
+
+**For `push` and `pull_request`, GitHub reads `.github/workflows/` from the
+commit that triggered the event — NOT from the default branch.**
+
+So a workflow only has to exist on the branch you're pushing to. And a
+workflow on some *other* branch has no effect on your push whatsoever.
+
+### The two gates
+
+```
+push to branch X
+      │
+      ▼
+Gate 1: does .github/workflows/ exist on BRANCH X's commit?
+      │  no ──▶ nothing runs, silently, with no error anywhere
+      ▼ yes
+Gate 2: does the `on:` filter match this event?
+      │  no ──▶ nothing runs
+      ▼ yes
+   the workflow runs
+```
+
+Both gates must pass. Failing either one produces **no output at all** — no
+red X, no message in the Actions tab. That silence is why this is so hard to
+debug.
+
+### Worked example
+
+Two branches, `main` (default) and `qa`. The workflow lives **only on `qa`**:
+
+```yaml
+# .github/workflows/ci.yml — committed on the qa branch only
+on:
+  push:
+    branches: [qa]
+```
+
+| Action | Result | Why |
+|---|---|---|
+| Push to `qa` | **Runs** | File exists on `qa` (gate 1 ✓), filter matches `qa` (gate 2 ✓) |
+| Push to `main` | **Nothing** | `main`'s commit has no `.github/workflows/` — gate 1 fails. The file on `qa` is invisible here |
+| Merge the file to `main`, then push to `main` | **Still nothing** | Gate 1 now passes, but `branches: [qa]` excludes `main` — gate 2 fails |
+| Open a PR `qa` → `main` | **Nothing** | No `pull_request` trigger is defined |
+
+To run on both branches you need **both** the file present on each branch
+*and* a filter that includes them:
+
+```yaml
+on:
+  push:
+    branches: [main, qa]
+  pull_request:
+    branches: [main]        # matches PRs TARGETING main
+```
+
+### Events that only ever read the default branch
+
+Four event types ignore the branch the file is on and look **only at the
+default branch**:
+
+| Event | If the workflow is only on a non-default branch |
+|---|---|
+| `schedule` (cron) | **Never fires** |
+| `workflow_dispatch` | **No "Run workflow" button appears**; `gh workflow run` errors |
+| `repository_dispatch` | Never fires |
+| `workflow_run` | Never fires |
+
+So a `schedule:` or a manual-run button requires the workflow to be merged to
+your default branch. This is the second half of the same confusion: people put
+a nightly job on a feature branch and wait for a run that can never happen.
+
+### `pull_request` uses the merge commit
+
+For `pull_request`, the workflow comes from the PR's **merge commit** (base
+merged with head). Two consequences:
+
+- Workflow **edits inside a PR do take effect** for that PR's own runs — handy
+  for iterating, and the reason `pull_request_target` exists for the cases
+  where you need the *base* version instead.
+- The `branches:` filter matches the PR's **target** branch, not its source.
+  `branches: [main]` means "PRs aimed at main", regardless of where they came
+  from.
+
 ## Trigger gotchas that cost people hours
 
 | Gotcha | What happens | Fix |
 |---|---|---|
+| Workflow only on branch A, you push to branch B | **Nothing runs, silently.** `push` reads workflows from the pushed commit — B has no workflow file | Merge the file to every branch you want it to run on (see above) |
+| Workflow present but `branches:` excludes the branch you pushed | Nothing runs | Add the branch to the filter — the file existing is not enough |
 | `schedule` on a non-default branch | Never fires | Merge to the default branch |
+| `workflow_dispatch` on a non-default branch | No "Run workflow" button; `gh workflow run` errors | Merge to the default branch |
 | `schedule` accuracy | Can be delayed 5–30+ min at busy times (top of the hour is worst) | Don't rely on exact timing; use `7 * * * *` not `0 * * * *` |
 | Scheduled workflows in an inactive repo | **Disabled after 60 days** of no activity | Push something, or re-enable in the UI |
 | `pull_request` from a fork | Secrets are **not** available; `GITHUB_TOKEN` is read-only | Use `pull_request_target` **very carefully** — see [SECURITY.md](SECURITY.md) |
