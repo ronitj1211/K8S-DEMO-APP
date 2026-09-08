@@ -11,6 +11,7 @@ Everything you need to understand GitHub Actions, in learning order:
 | [SECURITY.md](SECURITY.md) | Secrets, OIDC, permissions, script injection, pinning actions |
 | [EXAMPLES.md](EXAMPLES.md) | Copy-paste workflows: Node CI, Docker, Terraform, Kubernetes, matrix, reusable |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Errors you will hit, debugging, speed and cost |
+| **[pipelines/](pipelines/)** | **A complete production pipeline** — Spring Boot → ECR → EKS with OIDC, a human approval gate, security scanning and auto-rollback, plus the AWS/GitHub setup guide |
 | **[INTERVIEW.md](INTERVIEW.md)** | **60 interview questions with answers** — concept first, then a real scenario for each. Covers every section above |
 
 > **Nothing here runs.** These are docs only — there is no `.github/workflows/`
